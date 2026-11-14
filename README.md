@@ -10,9 +10,11 @@ An MCP server that reconciles a receipt and splits it between people to the exac
 | `split_receipt` | Reconciles, then allocates every component to people. Refuses if the receipt doesn't balance or anything is ambiguous. |
 | `allocate_amount` | Splits a single amount by weights using the same rounding. |
 | `list_splitwise_people` | Lists the signed-in user's Splitwise friends and groups, with ids. |
-| `add_expense_to_splitwise` | Splits the receipt the same way and records it as one Splitwise expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Refuses if the receipt doesn't reconcile or someone isn't mapped to a Splitwise user. |
+| `add_expense_to_splitwise` | Splits the receipt the same way and records it as one Splitwise expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Refuses if the receipt doesn't reconcile or someone isn't mapped to a Splitwise user. Also refuses likely duplicates (see below) unless `allow_duplicate` is set. |
 
 The two Splitwise tools only appear when Splitwise is configured (see below).
+
+**Duplicate protection.** Each expense the server adds gets a fingerprint line (`ref: swmcp-…`) in its notes. The fingerprint covers the group, purchase date, currency, total, and which Splitwise users owe how much. It ignores receipt names, item ids, the description, and who paid, so a re-parsed copy of the same receipt still matches. Before adding an expense, the server checks expenses added or changed in the last 30 days (up to 1,000 of them) for the same fingerprint, skipping deleted ones. If it finds a match, it refuses and names the existing expense. Pass `allow_duplicate: true` once the user confirms the expense really is separate, e.g. the same order on the same day. Limits: the server stores nothing, so two calls at the same moment can both get through, and expenses created outside this server (no `ref` line) aren't detected.
 
 ## Allocation rules
 

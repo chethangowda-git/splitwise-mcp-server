@@ -5,6 +5,10 @@ API reference: https://dev.splitwise.com/
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -14,6 +18,16 @@ from pydantic import BaseModel, Field
 from .models import SplitResult
 
 API_BASE = "https://secure.splitwise.com/api/v3.0"
+
+# Duplicate detection: every expense this server creates carries a fingerprint line
+# in its notes, and before creating one we look for that fingerprint among the
+# expenses added or changed recently. Splitwise is the only store; the server keeps
+# nothing.
+REF_LINE = "ref: {ref}"
+_REF_RE = re.compile(r"^ref: (swmcp-[0-9a-f]{16})$", re.MULTILINE)
+DUPLICATE_LOOKBACK = timedelta(days=30)
+DUPLICATE_PAGE_SIZE = 100
+DUPLICATE_MAX_PAGES = 10
 
 
 class SplitwiseError(Exception):
@@ -25,13 +39,19 @@ class SplitwiseClient:
         self._token = token
         self._http = http
 
-    async def _request(self, method: str, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        data: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._token}"}
         if self._http is not None:
-            resp = await self._http.request(method, API_BASE + path, data=data, headers=headers)
+            resp = await self._http.request(method, API_BASE + path, data=data, params=params, headers=headers)
         else:
             async with httpx2.AsyncClient(timeout=20) as http:
-                resp = await http.request(method, API_BASE + path, data=data, headers=headers)
+                resp = await http.request(method, API_BASE + path, data=data, params=params, headers=headers)
         if resp.status_code == 401:
             raise SplitwiseError("Splitwise rejected the sign-in. Reconnect the Splitwise connector and try again.")
         if resp.status_code == 429:
@@ -48,6 +68,18 @@ class SplitwiseClient:
 
     async def groups(self) -> list[dict[str, Any]]:
         return (await self._request("GET", "/get_groups"))["groups"]
+
+    async def expenses(
+        self, *, group_id: int | None, updated_after: datetime, limit: int, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        params = {
+            "updated_after": updated_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "limit": str(limit),
+            "offset": str(offset),
+        }
+        if group_id:
+            params["group_id"] = str(group_id)
+        return (await self._request("GET", "/get_expenses", params=params))["expenses"]
 
     async def create_expense(self, form: dict[str, str]) -> dict[str, Any]:
         body = await self._request("POST", "/create_expense", data=form)
@@ -145,12 +177,19 @@ def expense_form(
         raise ValueError(f"Splitwise cannot record a negative share, but {negative} would be owed a credit")
 
     cost = result.grand_total
+    ref = expense_ref(
+        currency=result.currency,
+        cost=cost,
+        group_id=group_id,
+        date=date,
+        owed={_identity(members[p]): owed[p] for p in involved if owed[p] != 0},
+    )
     form: dict[str, str] = {
         "cost": str(cost),
         "description": description,
         "currency_code": result.currency,
         "group_id": str(group_id),
-        "details": breakdown(result),
+        "details": breakdown(result) + "\n" + REF_LINE.format(ref=ref),
     }
     if date:
         form["date"] = date
@@ -161,6 +200,55 @@ def expense_form(
         form[f"users__{i}__paid_share"] = str(cost if person == paid_by else Decimal("0.00"))
         form[f"users__{i}__owed_share"] = str(owed[person])
     return form
+
+
+def _identity(who: int | str) -> str:
+    return str(who).strip().lower()
+
+
+def expense_ref(
+    *, currency: str, cost: Decimal, group_id: int, date: str | None, owed: dict[str, Decimal]
+) -> str:
+    """Fingerprint of what makes two expenses the same bill.
+
+    Same group, purchase date, currency, total, and Splitwise users owing the same
+    amounts. It ignores receipt names, item ids, the description, and who paid, so a
+    re-parsed or retitled copy of the same receipt still matches.
+    """
+    canon = json.dumps(
+        {
+            "currency": currency.upper(),
+            "cost": str(cost),
+            "group_id": group_id,
+            "date": date.strip()[:10] if date else None,
+            "owed": {who: str(amount) for who, amount in owed.items()},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "swmcp-" + hashlib.sha256(canon.encode()).hexdigest()[:16]
+
+
+async def find_duplicate(
+    client: SplitwiseClient, form: dict[str, str], now: datetime | None = None
+) -> dict[str, Any] | None:
+    """Return a live expense added or changed in the lookback window with the same fingerprint."""
+    match = _REF_RE.search(form["details"])
+    if match is None:  # every form from expense_form has one
+        raise ValueError("expense form has no ref line")
+    ref = match.group(1)
+    since = (now or datetime.now(timezone.utc)) - DUPLICATE_LOOKBACK
+    group_id = int(form["group_id"]) or None
+    for page in range(DUPLICATE_MAX_PAGES):
+        expenses = await client.expenses(
+            group_id=group_id, updated_after=since, limit=DUPLICATE_PAGE_SIZE, offset=page * DUPLICATE_PAGE_SIZE
+        )
+        for e in expenses:
+            if not e.get("deleted_at") and ref in _REF_RE.findall(e.get("details") or ""):
+                return e
+        if len(expenses) < DUPLICATE_PAGE_SIZE:
+            break
+    return None
 
 
 def breakdown(result: SplitResult) -> str:

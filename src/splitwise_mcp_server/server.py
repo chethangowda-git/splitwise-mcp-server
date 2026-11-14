@@ -28,6 +28,7 @@ from .splitwise_api import (
     SplitwiseError,
     SplitwisePeople,
     expense_form,
+    find_duplicate,
     list_people,
 )
 
@@ -48,6 +49,8 @@ Workflow:
 5. To record it in Splitwise: call list_splitwise_people, match each person on the
    receipt to a Splitwise user (confirm any uncertain match with the user), ask who
    paid, then call add_expense_to_splitwise. Confirm with the user before adding.
+   If it reports a likely duplicate, tell the user. Retry with allow_duplicate=true
+   only if they confirm it is a separate expense.
 """
 
 TokenSource = Callable[[], str | None]
@@ -174,6 +177,7 @@ def create_server(
         description: str,
         group_id: int = 0,
         date: str | None = None,
+        allow_duplicate: bool = False,
     ) -> CreatedExpense:
         """Split the receipt and record it as one expense in Splitwise.
 
@@ -183,10 +187,14 @@ def create_server(
         description: expense title shown in Splitwise, e.g. "Dinner at Luigi's".
         group_id: Splitwise group id, or 0 for an expense outside any group.
         date: optional ISO 8601 date of the purchase.
+        allow_duplicate: set true only after the user confirms that a reported
+            duplicate is really a separate expense.
 
         Uses exactly the same split as split_receipt; each person's owed share is
         their total, and the per-person breakdown goes in the expense notes. Refuses
-        if the receipt does not reconcile. Calling this twice creates two expenses.
+        if the receipt does not reconcile. Also refuses if this server already added
+        an expense in the last 30 days with the same group, date, currency, total,
+        and owed shares (a deleted expense doesn't count).
         """
         try:
             result = split(receipt)
@@ -198,8 +206,17 @@ def create_server(
             )
         except ValueError as e:
             raise ToolError(str(e)) from e
+        sw = client()
         try:
-            expense = await client().create_expense(form)
+            if not allow_duplicate and (dup := await find_duplicate(sw, form)):
+                raise ToolError(
+                    f"Not added: this looks like a duplicate of Splitwise expense {dup.get('id')} "
+                    f"(\"{dup.get('description')}\", {dup.get('cost')} {dup.get('currency_code')}, "
+                    f"created {dup.get('created_at')}). It has the same group, date, currency, total, "
+                    "and owed shares. If the user confirms this is a separate expense, call again "
+                    "with allow_duplicate=true."
+                )
+            expense = await sw.create_expense(form)
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
         return CreatedExpense(
