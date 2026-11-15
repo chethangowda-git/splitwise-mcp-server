@@ -1,6 +1,49 @@
 # splitwise-mcp-server
 
-An MCP server that reconciles a receipt and splits it between people to the exact cent.
+Split a receipt by chatting with Claude or ChatGPT, get everyone's share to the exact cent, and record it in Splitwise.
+
+<!-- Demo video: add the link here once it's recorded (see docs/demo.md). -->
+
+This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatGPT call a *connector*. The AI does the fuzzy work: it reads the receipt photo and asks who had what. This server does the work that has to be exact: it checks that the receipt adds up, splits every line by explicit rules, refuses to guess when something is ambiguous, and posts one expense to Splitwise.
+
+## What it looks like
+
+> **You:** *(photo of a receipt)* Split this between me, Bob, and Cara. Bob and I shared the pizza, he had 2 of the 3 slices. Knots were for everyone, the salad was Cara's, the lemonade mine, the beer Bob's.
+>
+> **Claude:** The receipt adds up to $57.44. How should the $2.99 delivery fee be shared: equally, in proportion to what each person ordered, or some other way?
+>
+> **You:** Equally.
+>
+> **Claude:** Ann $15.11 · Bob $25.79 · Cara $16.54 (total $57.44). Tax and tip follow what each person ordered, after the $5 promo.
+>
+> **You:** I paid. Add it to Splitwise.
+>
+> **Claude:** Added "Dinner at Luigi's" to Splitwise: Bob owes you $25.79 and Cara owes you $16.54.
+>
+> **You:** Add it again.
+>
+> **Claude:** That's already in Splitwise (same date, total, and shares), so I didn't add a second copy.
+
+## How it works
+
+```
+ Claude / ChatGPT                    splitwise-mcp-server                      Splitwise
+ ────────────────                    ────────────────────                      ─────────
+ reads the receipt,  ──tool call──▶  reconcile: does it add up?
+ asks who had what                   split: exact shares per person
+                     ◀──result────   (or a list of what's ambiguous)
+                     ──tool call──▶  duplicate check  ──────── get_expenses ──▶
+                                     add expense      ──────── create_expense ─▶
+```
+
+## Design decisions
+
+- **Exact money, rounding only where it must happen.** Amounts are `Decimal` at the edges and exact `Fraction`s inside, so a third is exactly a third. Each item, discount, tax, tip, and fee is rounded once, with the largest-remainder method and ties broken by name. Every component's shares add up to that component exactly, so everyone's totals add up to the printed total, and the same input always gives the same split. Rounding each person's total instead can gain or lose a cent.
+- **Check the receipt before splitting it.** If the parsed lines don't add up to the printed total, the server reports the difference and stops. A misread line is never quietly absorbed into someone's share.
+- **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
+- **Duplicate protection without a database.** Each expense carries a fingerprint in its Splitwise notes. Before adding one, the server looks for that fingerprint in recent expenses, so Splitwise itself is the record.
+- **Multi-user sign-in without a user database.** The server is a full OAuth 2.1 authorization server (dynamic client registration, PKCE, single-use codes, refresh token rotation with replay detection, revocation) that hands the actual login to Splitwise. Tokens are encrypted and self-contained. The only server-side state is the short-lived record OAuth requires, kept in Redis.
+- **A consent page before Splitwise.** Anyone can register an OAuth client with any redirect address, and Splitwise's own screen only names this server. The consent page shows which app is asking and where the user will be sent, so a crafted link can't quietly hand someone's account to a stranger.
 
 ## Tools
 
@@ -10,11 +53,9 @@ An MCP server that reconciles a receipt and splits it between people to the exac
 | `split_receipt` | Reconciles, then allocates every component to people. Refuses if the receipt doesn't balance or anything is ambiguous. |
 | `allocate_amount` | Splits a single amount by weights using the same rounding. |
 | `list_splitwise_people` | Lists the signed-in user's Splitwise friends and groups, with ids. |
-| `add_expense_to_splitwise` | Splits the receipt the same way and records it as one Splitwise expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Refuses if the receipt doesn't reconcile or someone isn't mapped to a Splitwise user. Also refuses likely duplicates (see below) unless `allow_duplicate` is set. |
+| `add_expense_to_splitwise` | Splits the receipt the same way and records it as one Splitwise expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Refuses if the receipt doesn't reconcile, someone isn't mapped to a Splitwise user, or it looks like a duplicate (unless `allow_duplicate` is set). |
 
-The two Splitwise tools only appear when Splitwise is configured (see below).
-
-**Duplicate protection.** Each expense the server adds gets a fingerprint line (`ref: swmcp-…`) in its notes. The fingerprint covers the group, purchase date, currency, total, and which Splitwise users owe how much. It ignores receipt names, item ids, the description, and who paid, so a re-parsed copy of the same receipt still matches. Before adding an expense, the server checks expenses added or changed in the last 30 days (up to 1,000 of them) for the same fingerprint, skipping deleted ones. If it finds a match, it refuses and names the existing expense. Pass `allow_duplicate: true` once the user confirms the expense really is separate, e.g. the same order on the same day. Limits: the server stores nothing, so two calls at the same moment can both get through, and expenses created outside this server (no `ref` line) aren't detected.
+The two Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
 
 ## Allocation rules
 
@@ -27,7 +68,7 @@ The two Splitwise tools only appear when Splitwise is configured (see below).
 - **Leftover cents** use the largest-remainder method. Ties go by person name, ascending by Unicode code point, so the result doesn't depend on input order.
 - **Reconciliation** is separate from allocation. An unexplained difference is reported and blocks the split. It is never assigned to a person. If the user confirms a real extra charge, add it as a fee with a policy.
 
-## Example
+### Example input
 
 ```json
 {
@@ -51,6 +92,12 @@ The two Splitwise tools only appear when Splitwise is configured (see below).
 
 Send money as strings so no float ever touches an amount. `minor_unit_digits` (default 2) supports currencies like JPY (`0`).
 
+## Duplicate protection
+
+Each expense the server adds gets a fingerprint line (`ref: swmcp-…`) in its notes. The fingerprint covers the group, purchase date, currency, total, and which Splitwise users owe how much. It ignores receipt names, item ids, the description, and who paid, so a re-parsed copy of the same receipt still matches. Before adding an expense, the server checks expenses added or changed in the last 30 days (up to 1,000 of them) for the same fingerprint, skipping deleted ones. If it finds a match, it refuses and names the existing expense. Pass `allow_duplicate: true` once the user confirms the expense really is separate, e.g. the same order on the same day.
+
+Limits: duplicate detection keeps no state of its own, so two calls at the same moment can both get through, and expenses created outside this server (no `ref` line) aren't detected.
+
 ## Setup
 
 ```bash
@@ -59,13 +106,27 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
-Re-run the `pip install` after changing source to update the installed server (tests run from `src/` directly). An editable install (`-e`) can break on macOS with Python 3.13, because the `.pth` file it writes may get the `hidden` flag, and Python then skips it.
+Re-run the `pip install` after changing source to update the installed server (tests run from `src/` directly). An editable install (`-e`) can break on macOS with Python 3.13, because the `.pth` file it writes may get the `hidden` flag, and Python then skips it. Keep the venv out of iCloud-synced folders such as `~/Documents`: iCloud can offload its files, and imports then hang.
 
 Claude Code:
 
 ```bash
 claude mcp add splitwise -- /path/to/splitwise-mcp-server/.venv/bin/splitwise-mcp-server
 ```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "splitwise": {
+      "command": "/path/to/splitwise-mcp-server/.venv/bin/splitwise-mcp-server"
+    }
+  }
+}
+```
+
+**Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable.
 
 ## Remote (HTTP) mode
 
@@ -75,13 +136,15 @@ splitwise-mcp-server --http --port 8000   # MCP endpoint: http://localhost:8000/
 
 HTTP mode is used automatically whenever `$PORT` is set. It binds `0.0.0.0`, runs stateless, and serves `GET /health` for health checks.
 
-**Railway:** `railway.json` sets the start command (`python main.py --http`, which runs from source with no install step) and the health check. `requirements.txt` lists the runtime dependencies, and `.python-version` pins Python. Keep `requirements.txt` in sync with `pyproject.toml`. After a deploy, generate a public domain under the service's **Settings → Networking**. The connector URL is `https://<your-domain>/mcp`. Use that URL for Claude custom connectors and ChatGPT developer-mode connectors (authentication: none).
+**Railway:** `railway.json` sets the start command (`python main.py --http`, which runs from source with no install step) and the health check. `requirements.txt` lists the runtime dependencies, and `.python-version` pins Python. Keep `requirements.txt` in sync with `pyproject.toml`. After a deploy, generate a public domain under the service's **Settings → Networking**. The connector URL is `https://<your-domain>/mcp`. Use that URL for Claude custom connectors and ChatGPT developer-mode connectors.
 
-Without the Splitwise settings below, the HTTP endpoint has no authentication and serves only the calculation tools.
+Without the Splitwise settings below, the HTTP endpoint has no authentication and serves only the calculation tools. With them, Claude and ChatGPT run the sign-in flow automatically when the connector is added.
 
 ## Splitwise sign-in (multi-user)
 
 When configured, everyone who adds the connector signs in with their own Splitwise account. The server is an OAuth authorization server for MCP clients (dynamic client registration + PKCE) and hands the actual login to Splitwise. Before sending users to Splitwise, it shows a consent page naming the requesting app and where the user will be redirected. All tools then require sign-in.
+
+Splitwise requires an active Splitwise Pro subscription to register an app and use its API. Only the account that registers the app needs it.
 
 1. Register an app at https://secure.splitwise.com/apps and set its callback URL to `https://<your-domain>/oauth/splitwise/callback`.
 2. Set these environment variables (on Railway: service → **Variables**):
@@ -104,16 +167,10 @@ The only server-side state is what OAuth 2.1 requires remembering, and each entr
 
 That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory, which is only correct for a single instance and is forgotten on restart; the server logs a warning in that case. Users can also revoke the server's access from their Splitwise account settings.
 
-**Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable.
+## Tests
 
-Claude Desktop (`claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "splitwise": {
-      "command": "/path/to/splitwise-mcp-server/.venv/bin/splitwise-mcp-server"
-    }
-  }
-}
+```bash
+.venv/bin/pytest
 ```
+
+The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (exact posted shares, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
