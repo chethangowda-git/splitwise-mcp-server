@@ -157,25 +157,8 @@ def expense_form(
     date: str | None,
 ) -> dict[str, str]:
     """Build the create_expense form. Raises ValueError for anything that can't be posted as-is."""
-    people = [p.person for p in result.people]
-    if paid_by not in people:
-        raise ValueError(f"paid_by '{paid_by}' is not one of the people on the receipt: {people}")
-    unknown = sorted(set(members) - set(people))
-    if unknown:
-        raise ValueError(f"members has names that are not on the receipt: {unknown}")
-
+    involved = involved_people(result, paid_by=paid_by, members=members)
     owed = {p.person: p.total for p in result.people}
-    involved = [p for p in people if owed[p] != 0 or p == paid_by]
-    missing = [p for p in involved if p not in members]
-    if missing:
-        raise ValueError(
-            f"No Splitwise user for {missing}. Map every person who owes something (and the payer) "
-            "to a Splitwise user id or email; use list_splitwise_people to look up ids."
-        )
-    negative = [p for p in involved if owed[p] < 0]
-    if negative:
-        raise ValueError(f"Splitwise cannot record a negative share, but {negative} would be owed a credit")
-
     cost = result.grand_total
     ref = expense_ref(
         currency=result.currency,
@@ -195,11 +178,45 @@ def expense_form(
         form["date"] = date
     for i, person in enumerate(involved):
         who = members[person]
-        key = "email" if isinstance(who, str) and "@" in who else "user_id"
-        form[f"users__{i}__{key}"] = str(who)
+        if isinstance(who, str) and "@" in who:
+            # Splitwise identifies a share by user_id, or by email + first_name + last_name;
+            # the names are used if the email is new and Splitwise invites it.
+            first, _, last = " ".join(person.split()).partition(" ")
+            form[f"users__{i}__email"] = who.strip()
+            form[f"users__{i}__first_name"] = first
+            form[f"users__{i}__last_name"] = last
+        else:
+            form[f"users__{i}__user_id"] = str(who)
         form[f"users__{i}__paid_share"] = str(cost if person == paid_by else Decimal("0.00"))
         form[f"users__{i}__owed_share"] = str(owed[person])
     return form
+
+
+def involved_people(result: SplitResult, *, paid_by: str, members: dict[str, Any]) -> list[str]:
+    """Receipt people who must be on the expense (the payer and everyone who owes), in receipt order.
+
+    Raises ValueError if paid_by or a members key isn't on the receipt, someone involved
+    has no mapping, or someone would be owed a credit.
+    """
+    people = [p.person for p in result.people]
+    if paid_by not in people:
+        raise ValueError(f"paid_by '{paid_by}' is not one of the people on the receipt: {people}")
+    unknown = sorted(set(members) - set(people))
+    if unknown:
+        raise ValueError(f"members has names that are not on the receipt: {unknown}")
+
+    owed = {p.person: p.total for p in result.people}
+    involved = [p for p in people if owed[p] != 0 or p == paid_by]
+    missing = [p for p in involved if p not in members]
+    if missing:
+        raise ValueError(
+            f"No Splitwise user for {missing}. Map every person who owes something (and the payer) "
+            "to a Splitwise user id or email; use find_splitwise_people to look up ids."
+        )
+    negative = [p for p in involved if owed[p] < 0]
+    if negative:
+        raise ValueError(f"Splitwise cannot record a negative share, but {negative} would be owed a credit")
+    return involved
 
 
 def _identity(who: int | str) -> str:

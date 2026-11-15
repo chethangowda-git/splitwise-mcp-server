@@ -22,16 +22,18 @@ from .allocation import ROUNDING_METHOD, AllocationError, allocate
 from .models import AllocationResult, Receipt, Reconciliation, SplitResult
 from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToken, SplitwiseOAuthProvider
 from .split import SplitError, reconcile, split
-from .store import RedisStore, Store
+from .confirm import Confirmer
+from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense
+from .people import Directory, PeopleSearch, find_people
 from .splitwise_api import (
     CreatedExpense,
     SplitwiseClient,
     SplitwiseError,
     SplitwisePeople,
-    expense_form,
     find_duplicate,
     list_people,
 )
+from .store import RedisStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +49,15 @@ Workflow:
    split equally or by weight, which items are tax-exempt, how each fee is shared,
    and the tip policy if it is not proportional.
 4. Call split_receipt and show the result.
-5. To record it in Splitwise: call list_splitwise_people, match each person on the
-   receipt to a Splitwise user (confirm any uncertain match with the user), ask who
-   paid, then call add_expense_to_splitwise. Confirm with the user before adding.
-   If it reports a likely duplicate, tell the user. Retry with allow_duplicate=true
+5. To record it in Splitwise, first match people: call find_splitwise_people with
+   every name on the receipt (use "me" for the user). For "ambiguous", show the
+   candidates' names and emails and ask which one. For "none", ask for the person's
+   email (Splitwise will invite them) or offer the suggestions. Never guess a person.
+   Ask who paid, and use list_splitwise_people if the expense belongs in a group.
+6. Call preview_splitwise_expense and show the user its summary. Add nothing until
+   they explicitly approve it. Then call add_expense_to_splitwise with the same
+   arguments plus the preview's confirmation. If anything changes, preview again.
+7. If the preview warns about a duplicate, tell the user. Pass allow_duplicate=true
    only if they confirm it is a separate expense.
 """
 
@@ -153,23 +160,93 @@ def create_server(
     if splitwise_token is None:
         return mcp
 
-    def client() -> SplitwiseClient:
+    def current_token() -> str:
         token = splitwise_token()
         if not token:
             raise ToolError("Not signed in to Splitwise. Reconnect the Splitwise connector and try again.")
-        return SplitwiseClient(token, http)
+        return token
+
+    def client() -> SplitwiseClient:
+        return SplitwiseClient(current_token(), http)
+
+    confirmer = Confirmer(oauth.server_secret if oauth else None)
+
+    async def prepare(
+        receipt: Receipt, paid_by: str, members: dict[str, int | str], description: str, group_id: int, date: str | None
+    ) -> tuple[str, PreparedExpense]:
+        token = current_token()
+        try:
+            prepared = await prepare_expense(
+                SplitwiseClient(token, http),
+                receipt,
+                paid_by=paid_by,
+                members=members,
+                description=description,
+                group_id=group_id,
+                date=date,
+            )
+        except SplitError as e:
+            raise ToolError("Cannot split receipt:\n- " + "\n- ".join(e.problems)) from e
+        except (ValueError, SplitwiseError) as e:
+            raise ToolError(str(e)) from e
+        return token, prepared
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def list_splitwise_people() -> SplitwisePeople:
         """List the signed-in Splitwise user, their friends, and their groups with members.
 
-        Use the ids to map people on a receipt to Splitwise users, and a group id to
-        add the expense to a group.
+        Use it to pick a group for the expense. To match names on a receipt to
+        Splitwise users, use find_splitwise_people.
         """
         try:
             return await list_people(client())
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def find_splitwise_people(names: list[str]) -> PeopleSearch:
+        """Look up names (or emails) among the user, their friends, and their groups' members.
+
+        Each result is 'match' (one person), 'ambiguous' (several: ask the user which
+        one), or 'none' (ask for an email, or offer the close suggestions). Use "me"
+        for the signed-in user. It never picks between several people.
+        """
+        try:
+            directory = Directory.from_people(await list_people(client()))
+        except SplitwiseError as e:
+            raise ToolError(str(e)) from e
+        return find_people(directory, names)
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def preview_splitwise_expense(
+        receipt: Receipt,
+        paid_by: str,
+        members: dict[str, int | str],
+        description: str,
+        group_id: int = 0,
+        date: str | None = None,
+    ) -> ExpensePreview:
+        """Show exactly what add_expense_to_splitwise would record, without recording anything.
+
+        Takes the same arguments as add_expense_to_splitwise (minus confirmation).
+        Checks every person against the user's Splitwise contacts, reports a likely
+        duplicate, and returns a summary to show the user and a confirmation code that
+        add_expense_to_splitwise requires.
+        """
+        token, prepared = await prepare(receipt, paid_by, members, description, group_id, date)
+        try:
+            duplicate = await find_duplicate(SplitwiseClient(token, http), prepared.form)
+        except SplitwiseError as e:
+            raise ToolError(str(e)) from e
+        return build_preview(
+            prepared,
+            paid_by=paid_by,
+            description=description,
+            group_id=group_id,
+            date=date,
+            duplicate=duplicate,
+            confirmation=confirmer.sign(prepared.form, token),
+        )
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -181,40 +258,36 @@ def create_server(
         paid_by: str,
         members: dict[str, int | str],
         description: str,
+        confirmation: str,
         group_id: int = 0,
         date: str | None = None,
         allow_duplicate: bool = False,
     ) -> CreatedExpense:
-        """Split the receipt and record it as one expense in Splitwise.
+        """Record the receipt as one expense in Splitwise, after the user approved its preview.
 
         paid_by: the person on the receipt who paid the whole bill.
-        members: receipt person name -> Splitwise user id (from list_splitwise_people)
+        members: receipt person name -> Splitwise user id (from find_splitwise_people)
             or email address. Required for the payer and everyone who owes something.
         description: expense title shown in Splitwise, e.g. "Dinner at Luigi's".
+        confirmation: from preview_splitwise_expense, called with these same arguments.
         group_id: Splitwise group id, or 0 for an expense outside any group.
         date: optional ISO 8601 date of the purchase.
         allow_duplicate: set true only after the user confirms that a reported
             duplicate is really a separate expense.
 
-        Uses exactly the same split as split_receipt; each person's owed share is
-        their total, and the per-person breakdown goes in the expense notes. Refuses
-        if the receipt does not reconcile. Also refuses if this server already added
-        an expense in the last 30 days with the same group, date, currency, total,
-        and owed shares (a deleted expense doesn't count).
+        Refuses if anything differs from the preview, the preview is over 30 minutes
+        old, a person doesn't check out against the user's contacts, or this server
+        already added the same expense in the last 30 days (a deleted one doesn't count).
         """
-        try:
-            result = split(receipt)
-        except SplitError as e:
-            raise ToolError("Cannot split receipt:\n- " + "\n- ".join(e.problems)) from e
-        try:
-            form = expense_form(
-                result, paid_by=paid_by, members=members, description=description, group_id=group_id, date=date
+        token, prepared = await prepare(receipt, paid_by, members, description, group_id, date)
+        if problem := confirmer.problem(confirmation, prepared.form, token):
+            raise ToolError(
+                f"Not added: {problem}. Call preview_splitwise_expense with these arguments, show the user "
+                "its summary, and pass its confirmation once they approve."
             )
-        except ValueError as e:
-            raise ToolError(str(e)) from e
-        sw = client()
+        sw = SplitwiseClient(token, http)
         try:
-            if not allow_duplicate and (dup := await find_duplicate(sw, form)):
+            if not allow_duplicate and (dup := await find_duplicate(sw, prepared.form)):
                 raise ToolError(
                     f"Not added: this looks like a duplicate of Splitwise expense {dup.get('id')} "
                     f"(\"{dup.get('description')}\", {dup.get('cost')} {dup.get('currency_code')}, "
@@ -222,9 +295,10 @@ def create_server(
                     "and owed shares. If the user confirms this is a separate expense, call again "
                     "with allow_duplicate=true."
                 )
-            expense = await sw.create_expense(form)
+            expense = await sw.create_expense(prepared.form)
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
+        result = prepared.result
         return CreatedExpense(
             expense_id=expense["id"],
             description=description,

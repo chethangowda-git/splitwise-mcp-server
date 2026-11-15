@@ -18,7 +18,18 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 >
 > **You:** I paid. Add it to Splitwise.
 >
-> **Claude:** Added "Dinner at Luigi's" to Splitwise: Bob owes you $25.79 and Cara owes you $16.54.
+> **Claude:** You have two Bobs in Splitwise: Bob Smith (bob.smith@…) and Bob Lee (blee@…). Which one?
+>
+> **You:** Bob Smith.
+>
+> **Claude:** Here's what I'll add:
+> "Dinner at Luigi's": 57.44 USD, outside any group. Paid by Ann (you).
+> Ann (you) owes 15.11 · Bob Smith owes 25.79 · Cara Diaz owes 16.54.
+> Add it?
+>
+> **You:** Yes.
+>
+> **Claude:** Added. Bob owes you $25.79 and Cara owes you $16.54.
 >
 > **You:** Add it again.
 >
@@ -41,6 +52,8 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 - **Exact money, rounding only where it must happen.** Amounts are `Decimal` at the edges and exact `Fraction`s inside, so a third is exactly a third. Each item, discount, tax, tip, and fee is rounded once, with the largest-remainder method and ties broken by name. Every component's shares add up to that component exactly, so everyone's totals add up to the printed total, and the same input always gives the same split. Rounding each person's total instead can gain or lose a cent.
 - **Check the receipt before splitting it.** If the parsed lines don't add up to the printed total, the server reports the difference and stops. A misread line is never quietly absorbed into someone's share.
 - **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
+- **Never guess a person.** Name lookup reports one match, several, or none, and never picks between several. Before anything is previewed or posted, the server checks every person against the user's own Splitwise contacts: an id must be the user, a friend, or a member of the target group, and two names on the receipt can't be the same person. A wrong or made-up id is refused rather than posted.
+- **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes. If anything changes after the preview, the add is refused.
 - **Duplicate protection without a database.** Each expense carries a fingerprint in its Splitwise notes. Before adding one, the server looks for that fingerprint in recent expenses, so Splitwise itself is the record.
 - **Multi-user sign-in without a user database.** The server is a full OAuth 2.1 authorization server (dynamic client registration, PKCE, single-use codes, refresh token rotation with replay detection, revocation) that hands the actual login to Splitwise. Tokens are encrypted and self-contained. The only server-side state is the short-lived record OAuth requires, kept in Redis.
 - **A consent page before Splitwise.** Anyone can register an OAuth client with any redirect address, and Splitwise's own screen only names this server. The consent page shows which app is asking and where the user will be sent, so a crafted link can't quietly hand someone's account to a stranger.
@@ -53,9 +66,11 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 | `split_receipt` | Reconciles, then allocates every component to people. Refuses if the receipt doesn't balance or anything is ambiguous. |
 | `allocate_amount` | Splits a single amount by weights using the same rounding. |
 | `list_splitwise_people` | Lists the signed-in user's Splitwise friends and groups, with ids. |
-| `add_expense_to_splitwise` | Splits the receipt the same way and records it as one Splitwise expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Refuses if the receipt doesn't reconcile, someone isn't mapped to a Splitwise user, or it looks like a duplicate (unless `allow_duplicate` is set). |
+| `find_splitwise_people` | Looks up names or emails among the user, their friends, and their groups' members. Each result is `match`, `ambiguous` (with every candidate's name and email), or `none` (with close suggestions). |
+| `preview_splitwise_expense` | Read-only. Shows exactly what would be added: the people as Splitwise knows them, each share, the group, and any likely duplicate. Returns a summary to show the user and a confirmation code. |
+| `add_expense_to_splitwise` | Records the previewed expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Needs the preview's confirmation code. Refuses if anything differs from the preview, a person doesn't check out against the user's contacts, or it looks like a duplicate (unless `allow_duplicate` is set). |
 
-The two Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
+The four Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
 
 ## Allocation rules
 
@@ -173,4 +188,4 @@ That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory
 .venv/bin/pytest
 ```
 
-The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (exact posted shares, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
+The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, confirmation codes, exact posted shares, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).

@@ -40,7 +40,8 @@ The amounts below use the names Ann (you), Bob, and Cara. With other names, a ce
 |---|---|---|---|---|
 | 1 | 0:00 | *(attach the receipt)* "Split this between me, Bob, and Cara. Bob and I shared the pizza, he had 2 of the 3 slices. Knots were for everyone, the salad was Cara's, the lemonade mine, the beer Bob's." | Claude reads the receipt and calls `reconcile_receipt`. It says the receipt adds up and asks how to share the delivery fee. | It checks the math first and **asks instead of guessing**. |
 | 2 | 0:20 | "Equally." | Claude calls `split_receipt` and shows **Ann $15.11 · Bob $25.79 · Cara $16.54**. | Exact cents; tax and tip follow what each person ordered, after the promo. |
-| 3 | 0:35 | "I paid. Add it to Splitwise as Dinner at Luigi's." | Claude calls `list_splitwise_people`, matches the names, confirms, then calls `add_expense_to_splitwise`. | Your own Splitwise account, through sign-in. |
+| 3 | 0:35 | "I paid. Add it to Splitwise as Dinner at Luigi's." | Claude calls `find_splitwise_people`. If you have two Bobs, it asks which one. Then it calls `preview_splitwise_expense` and shows exactly what will be added. | **It never guesses a person**, and shows the result before adding. |
+| 3b | 0:45 | "Yes." | Claude calls `add_expense_to_splitwise` with the preview's confirmation. | Nothing is added without your approval. |
 | 4 | 0:50 | *(switch to the Splitwise app or website)* | The expense shows Bob owing $25.79 and Cara $16.54, with the per-person breakdown in the notes. | It's real, not a mock. |
 | 5 | 1:05 | "Add it again." | Claude reports it's a duplicate and names the existing expense. Nothing is added. | **Safe to retry.** |
 | 6 | 1:15 | *(optional)* "Actually the total was 58.44." | Claude reports a $1.00 difference and won't split until it's explained. | A misread is never absorbed into someone's share. |
