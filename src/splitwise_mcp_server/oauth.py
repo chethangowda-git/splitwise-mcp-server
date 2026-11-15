@@ -11,16 +11,20 @@ The consent page names the requesting app and where it will send the user. Anyon
 register a client (with any redirect URI), and Splitwise's own screen only names this
 server, so without it a crafted link could hand a user's access to someone else.
 
-Nothing is stored server-side. Registered clients, in-flight authorization state,
-authorization codes, and tokens are all sealed with Fernet (authenticated encryption)
-under SERVER_SECRET and handed to the client as opaque strings. Each user's Splitwise
-token lives only inside their own sealed MCP token. Consequences:
+Registered clients, in-flight authorization state, authorization codes, and tokens are
+all sealed with Fernet (authenticated encryption) under SERVER_SECRET and handed to the
+client as opaque strings. Each user's Splitwise token lives only inside their own sealed
+MCP token. Rotating SERVER_SECRET signs everyone out and invalidates registered clients.
 
-- Rotating SERVER_SECRET signs everyone out and invalidates registered clients.
-- Revocation is not supported: tokens stay valid until they expire. A user can
-  revoke the server's access to their account from Splitwise's settings.
-- Authorization codes are not strictly single-use. They expire after 5 minutes and
-  are bound to the client's PKCE verifier, which an attacker would also need.
+The only server-side state is what OAuth 2.1 requires remembering (see store.py). Every
+sign-in starts a grant, and all tokens issued from it carry its id:
+
+- Authorization codes are single-use. Exchanging one twice fails and revokes the
+  grant, since the second attempt means the code leaked.
+- Refresh tokens rotate: each refresh returns a new pair and retires the old refresh
+  token. Presenting a retired one fails and revokes the grant, which signs out both the
+  thief and the user.
+- POST /revoke (RFC 7009) revokes the grant of the access or refresh token it is given.
 """
 
 from __future__ import annotations
@@ -46,10 +50,13 @@ from mcp.server.auth.provider import (
     TokenError,
     construct_redirect_uri,
 )
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
+
+from .store import MemoryStore, Store
 
 SPLITWISE_AUTHORIZE_URL = "https://secure.splitwise.com/oauth/authorize"
 SPLITWISE_TOKEN_URL = "https://secure.splitwise.com/oauth/token"
@@ -69,6 +76,7 @@ class OAuthConfig:
     splitwise_client_id: str
     splitwise_client_secret: str
     server_secret: str
+    redis_url: str | None = None  # shared store for replay protection; None = in memory
 
     @property
     def callback_url(self) -> str:
@@ -83,6 +91,7 @@ class OAuthConfig:
             client_registration_options=ClientRegistrationOptions(
                 enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE]
             ),
+            revocation_options=RevocationOptions(enabled=True),
         )
 
 
@@ -113,23 +122,45 @@ class Sealer:
 
 class SplitwiseAuthorizationCode(AuthorizationCode):
     splitwise_token: str
+    nonce: str  # also the id of the grant this code starts
 
 
 class SplitwiseRefreshToken(RefreshToken):
     splitwise_token: str
+    grant: str
+    jti: str  # this refresh token's own id, retired when it is rotated
 
 
 class SplitwiseAccessToken(AccessToken):
     splitwise_token: str
+    grant: str
+
+
+def _used_code(nonce: str) -> str:
+    return f"code:{nonce}"
+
+
+def _used_refresh(jti: str) -> str:
+    return f"refresh:{jti}"
+
+
+def _revoked(grant: str) -> str:
+    return f"grant:{grant}:revoked"
 
 
 class SplitwiseOAuthProvider:
     """OAuthAuthorizationServerProvider backed by Splitwise login and sealed tokens."""
 
-    def __init__(self, config: OAuthConfig, http: httpx2.AsyncClient | None = None):
+    def __init__(self, config: OAuthConfig, http: httpx2.AsyncClient | None = None, store: Store | None = None):
         self.config = config
         self.sealer = Sealer(config.server_secret)
+        self.store: Store = store if store is not None else MemoryStore()
         self._http = http
+
+    async def _revoke_grant(self, grant: str) -> None:
+        # Every token in a grant expires within REFRESH_TTL of being issued, and none
+        # is issued after this, so the mark only needs to outlive that window.
+        await self.store.put(_revoked(grant), REFRESH_TTL)
 
     # ------------------------------------------------------------ clients
 
@@ -264,48 +295,79 @@ Only continue if you started this from an app you trust and that address is expe
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> SplitwiseAuthorizationCode | None:
         data = self.sealer.open("code", authorization_code, ttl=CODE_TTL)
-        if data is None or data["client_id"] != client.client_id:
+        if data is None or data.get("client_id") != client.client_id:
             return None
-        data.pop("nonce", None)
-        return SplitwiseAuthorizationCode(code=authorization_code, **data)
+        try:
+            return SplitwiseAuthorizationCode(code=authorization_code, **data)
+        except ValidationError:
+            return None
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: SplitwiseAuthorizationCode
     ) -> OAuthToken:
-        return self._issue(client.client_id, authorization_code.scopes, authorization_code.splitwise_token)
+        grant = authorization_code.nonce
+        if not await self.store.claim(_used_code(grant), CODE_TTL):
+            await self._revoke_grant(grant)
+            raise TokenError("invalid_grant", "Authorization code was already used")
+        return self._issue(client.client_id, authorization_code.scopes, authorization_code.splitwise_token, grant)
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> SplitwiseRefreshToken | None:
         data = self.sealer.open("refresh", refresh_token, ttl=REFRESH_TTL)
-        if data is None or data["client_id"] != client.client_id:
+        if data is None or data.get("client_id") != client.client_id:
             return None
-        return SplitwiseRefreshToken(token=refresh_token, **data)
+        try:
+            token = SplitwiseRefreshToken(token=refresh_token, **data)
+        except ValidationError:  # issued before grants existed: sign in again
+            return None
+        if await self.store.exists(_revoked(token.grant)):
+            return None
+        if await self.store.exists(_used_refresh(token.jti)):
+            await self._revoke_grant(token.grant)  # a retired token came back: it leaked
+            return None
+        return token
 
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: SplitwiseRefreshToken, scopes: list[str]
     ) -> OAuthToken:
         if scopes and not set(scopes) <= set(refresh_token.scopes):
             raise TokenError("invalid_scope", "Requested scopes exceed the original grant")
-        return self._issue(client.client_id, scopes or refresh_token.scopes, refresh_token.splitwise_token)
+        remaining = (refresh_token.expires_at or 0) - int(time.time())
+        # The atomic claim settles two refreshes racing past load_refresh_token.
+        if not await self.store.claim(_used_refresh(refresh_token.jti), remaining):
+            await self._revoke_grant(refresh_token.grant)
+            raise TokenError("invalid_grant", "Refresh token was already used")
+        return self._issue(
+            client.client_id, scopes or refresh_token.scopes, refresh_token.splitwise_token, refresh_token.grant
+        )
 
     async def load_access_token(self, token: str) -> SplitwiseAccessToken | None:
         data = self.sealer.open("access", token, ttl=ACCESS_TTL)
         if data is None:
             return None
-        return SplitwiseAccessToken(token=token, **data)
+        try:
+            access = SplitwiseAccessToken(token=token, **data)
+        except ValidationError:  # issued before grants existed: sign in again
+            return None
+        if await self.store.exists(_revoked(access.grant)):
+            return None
+        return access
 
-    async def revoke_token(self, token: Any) -> None:  # revocation is not enabled
-        return None
+    async def revoke_token(self, token: SplitwiseAccessToken | SplitwiseRefreshToken) -> None:
+        # Revoking either token of a pair revokes the whole grant (RFC 7009 §2.1).
+        await self._revoke_grant(token.grant)
 
     async def exchange_identity_assertion(self, client: Any, params: Any) -> OAuthToken:
         raise TokenError("unsupported_grant_type", "Not supported")
 
-    def _issue(self, client_id: str, scopes: list[str], splitwise_token: str) -> OAuthToken:
+    def _issue(self, client_id: str, scopes: list[str], splitwise_token: str, grant: str) -> OAuthToken:
         now = int(time.time())
-        claims = {"client_id": client_id, "scopes": scopes, "splitwise_token": splitwise_token}
+        claims = {"client_id": client_id, "scopes": scopes, "splitwise_token": splitwise_token, "grant": grant}
         access = self.sealer.seal("access", {**claims, "expires_at": now + ACCESS_TTL})
-        refresh = self.sealer.seal("refresh", {**claims, "expires_at": now + REFRESH_TTL})
+        refresh = self.sealer.seal(
+            "refresh", {**claims, "jti": secrets.token_urlsafe(12), "expires_at": now + REFRESH_TTL}
+        )
         return OAuthToken(
             access_token=access,
             token_type="Bearer",

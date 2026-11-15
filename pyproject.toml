@@ -9,10 +9,11 @@ dependencies = [
     "pydantic>=2.7",
     "httpx2>=2.13",
     "cryptography>=42",
+    "redis>=5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "fakeredis>=2.20"]
 
 [project.scripts]
 splitwise-mcp-server = "splitwise_mcp_server.server:main"

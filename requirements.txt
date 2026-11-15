@@ -2,3 +2,4 @@ mcp>=2.2,<3
 pydantic>=2.7
 httpx2>=2.13
 cryptography>=42
+redis>=5

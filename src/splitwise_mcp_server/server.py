@@ -22,6 +22,7 @@ from .allocation import ROUNDING_METHOD, AllocationError, allocate
 from .models import AllocationResult, Receipt, Reconciliation, SplitResult
 from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToken, SplitwiseOAuthProvider
 from .split import SplitError, reconcile, split
+from .store import RedisStore, Store
 from .splitwise_api import (
     CreatedExpense,
     SplitwiseClient,
@@ -65,6 +66,7 @@ def create_server(
     oauth: OAuthConfig | None = None,
     splitwise_token: TokenSource | None = None,
     http: httpx2.AsyncClient | None = None,
+    store: Store | None = None,
 ) -> MCPServer:
     """Build the server.
 
@@ -73,8 +75,12 @@ def create_server(
         user's token when oauth is set. Splitwise tools are registered only when
         one of the two is given.
     http: optional shared HTTP client for calls to Splitwise (used by tests).
+    store: OAuth replay/revocation store. Defaults to Redis when oauth.redis_url is
+        set, otherwise in memory.
     """
-    provider = SplitwiseOAuthProvider(oauth, http) if oauth else None
+    if store is None and oauth is not None and oauth.redis_url:
+        store = RedisStore.from_url(oauth.redis_url)
+    provider = SplitwiseOAuthProvider(oauth, http, store) if oauth else None
     mcp = MCPServer(
         name="splitwise-mcp-server",
         version=__version__,
@@ -247,6 +253,7 @@ def oauth_config_from_env() -> OAuthConfig | None:
         splitwise_client_id=values["SPLITWISE_CLIENT_ID"],
         splitwise_client_secret=values["SPLITWISE_CLIENT_SECRET"],
         server_secret=values["SERVER_SECRET"],
+        redis_url=os.environ.get("REDIS_URL", "").strip() or None,
     )
 
 
@@ -266,6 +273,11 @@ def main() -> None:
         oauth = oauth_config_from_env()
         if oauth is None:
             log.warning("Splitwise sign-in is not configured: serving calculation tools only, without auth.")
+        elif not oauth.redis_url:
+            log.warning(
+                "REDIS_URL is not set: used codes, rotated refresh tokens, and revocations are kept in memory. "
+                "That is only correct for a single instance, and a restart forgets them."
+            )
         mcp = create_server(oauth)
         # Stateless: every request stands alone, so any replica can serve it.
         mcp.run("streamable-http", host=args.host, port=args.port, stateless_http=True)

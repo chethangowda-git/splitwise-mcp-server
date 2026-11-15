@@ -92,8 +92,17 @@ When configured, everyone who adds the connector signs in with their own Splitwi
 | `SPLITWISE_CLIENT_ID` | The app's consumer key |
 | `SPLITWISE_CLIENT_SECRET` | The app's consumer secret |
 | `SERVER_SECRET` | A random string of 32+ characters, e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `REDIS_URL` | Optional but recommended. On Railway, add a Redis service and set this to `${{Redis.REDIS_URL}}`. |
 
-The server stores nothing. Client registrations, sign-in state, and tokens are encrypted with `SERVER_SECRET` and handed to the client, and each user's Splitwise token exists only inside their own encrypted token. Changing `SERVER_SECRET` signs everyone out. Access tokens last 24 hours and refresh tokens 90 days. There is no server-side revocation: users can revoke access from their Splitwise account settings.
+Client registrations, sign-in state, and tokens are encrypted with `SERVER_SECRET` and handed to the client. Each user's Splitwise token exists only inside their own encrypted token. Changing `SERVER_SECRET` signs everyone out. Access tokens last 24 hours and refresh tokens 90 days.
+
+The only server-side state is what OAuth 2.1 requires remembering, and each entry expires with the token it describes:
+
+- **Authorization codes are single-use.** A second exchange fails and revokes everything issued from that sign-in.
+- **Refresh tokens rotate.** Each refresh returns a new pair and retires the old refresh token. If a retired one is used again, it must have leaked, so the whole sign-in is revoked: the thief and the user are both signed out, and the user signs in again.
+- **Revocation** (`POST /revoke`, RFC 7009) signs out the sign-in that the given token belongs to. Because of an MCP SDK bug, a public client has to send an empty `client_secret` field (see `tests/test_oauth.py`).
+
+That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory, which is only correct for a single instance and is forgotten on restart; the server logs a warning in that case. Users can also revoke the server's access from their Splitwise account settings.
 
 **Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable.
 
