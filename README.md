@@ -53,7 +53,8 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 - **Check the receipt before splitting it.** If the parsed lines don't add up to the printed total, the server reports the difference and stops. A misread line is never quietly absorbed into someone's share.
 - **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
 - **Never guess a person.** Name lookup reports one match, several, or none, and never picks between several. Before anything is previewed or posted, the server checks every person against the user's own Splitwise contacts: an id must be the user, a friend, or a member of the target group, and two names on the receipt can't be the same person. A wrong or made-up id is refused rather than posted.
-- **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes. If anything changes after the preview, the add is refused.
+- **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes and usable once. If anything changes after the preview, the add is refused.
+- **Check what Splitwise actually saved.** Splitwise can return success and still change an expense (it silently drops a new person from a group expense). After every add, the server compares the saved shares with the previewed ones and reports any difference instead of claiming success.
 - **Duplicate protection without a database.** Each expense carries a fingerprint in its Splitwise notes. Before adding one, the server looks for that fingerprint in recent expenses, so Splitwise itself is the record.
 - **Multi-user sign-in without a user database.** The server is a full OAuth 2.1 authorization server (dynamic client registration, PKCE, single-use codes, refresh token rotation with replay detection, revocation) that hands the actual login to Splitwise. Tokens are encrypted and self-contained. The only server-side state is the short-lived record OAuth requires, kept in Redis.
 - **A consent page before Splitwise.** Anyone can register an OAuth client with any redirect address, and Splitwise's own screen only names this server. The consent page shows which app is asking and where the user will be sent, so a crafted link can't quietly hand someone's account to a stranger.
@@ -111,7 +112,16 @@ Send money as strings so no float ever touches an amount. `minor_unit_digits` (d
 
 Each expense the server adds gets a fingerprint line (`ref: swmcp-…`) in its notes. The fingerprint covers the group, purchase date, currency, total, and which Splitwise users owe how much. It ignores receipt names, item ids, the description, and who paid, so a re-parsed copy of the same receipt still matches. Before adding an expense, the server checks expenses added or changed in the last 30 days (up to 1,000 of them) for the same fingerprint, skipping deleted ones. If it finds a match, it refuses and names the existing expense. Pass `allow_duplicate: true` once the user confirms the expense really is separate, e.g. the same order on the same day.
 
-Limits: duplicate detection keeps no state of its own, so two calls at the same moment can both get through, and expenses created outside this server (no `ref` line) aren't detected.
+Two adds racing on the same preview can't both post: each confirmation code is single-use.
+
+## Known limits
+
+- Expenses created in the Splitwise app (no `ref` line) aren't detected as duplicates.
+- One payer per expense; "I paid $30 and Bob paid $20" isn't supported.
+- Someone outside the target group is refused rather than added to it; add them to the group in Splitwise first. A new person (an email Splitwise doesn't know) can only be added to an expense outside any group, because Splitwise leaves new people out of group expenses.
+- Name lookup ignores case, accents, and spacing, but not nicknames ("Mike" won't find "Michael"); the AI asks instead.
+- No editing or deleting expenses; do that in Splitwise.
+- The server makes the preview mandatory, but can't force the AI to show it; the client's own approval prompt for the add tool is the backstop.
 
 ## Setup
 
@@ -188,4 +198,4 @@ That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory
 .venv/bin/pytest
 ```
 
-The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, confirmation codes, exact posted shares, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
+The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, single-use confirmation codes including racing adds, exact posted shares, checking what Splitwise saved, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).

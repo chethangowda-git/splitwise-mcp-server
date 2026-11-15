@@ -1,10 +1,12 @@
 from urllib.parse import parse_qs
 
+import anyio
 import httpx2
 import pytest
 from mcp.client import Client
 
 from splitwise_mcp_server.confirm import Confirmer
+from splitwise_mcp_server.people import Contact, Directory, find_people
 from splitwise_mcp_server.server import create_server
 
 pytestmark = pytest.mark.anyio
@@ -40,13 +42,18 @@ def anyio_backend():
     return "asyncio"
 
 
-def fake_api(calls, errors=None, store=None, fail=None):
+def fake_api(calls, errors=None, store=None, fail=None, gate=None, drop_new_people=False):
     """A Splitwise stand-in. `store` holds created expenses, so later calls see earlier ones.
-    `fail` is a set of paths that return HTTP 500 while they're in it."""
+    `fail` is a set of paths that return HTTP 500 while they're in it. While gate["hold"]
+    is n > 0, each duplicate lookup waits until n have arrived, forcing concurrent adds to overlap.
+    `drop_new_people` saves the expense without email-identified people, as real Splitwise
+    does for a new person in a group expense."""
     store = [] if store is None else store
     fail = set() if fail is None else fail
+    gate = {"hold": 0} if gate is None else gate
+    waiting = {"n": 0, "all_in": anyio.Event()}
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(request)
         assert request.headers["authorization"] == "Bearer tok"
         path = request.url.path.removeprefix("/api/v3.0")
@@ -63,18 +70,36 @@ def fake_api(calls, errors=None, store=None, fail=None):
             assert "updated_after" in q
             found = [e for e in store if not q.get("group_id") or str(e["group_id"]) == q["group_id"]]
             offset, limit = int(q.get("offset", 0)), int(q.get("limit", 20))
-            return httpx2.Response(200, json={"expenses": found[offset:offset + limit]})
+            page = found[offset:offset + limit]  # read before holding, as a racing lookup would
+            if gate["hold"]:
+                waiting["n"] += 1
+                if waiting["n"] >= gate["hold"]:
+                    waiting["all_in"].set()
+                with anyio.fail_after(5):
+                    await waiting["all_in"].wait()
+            return httpx2.Response(200, json={"expenses": page})
         if path == "/create_expense":
             if errors:
                 return httpx2.Response(200, json={"expenses": [], "errors": errors})
-            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+            form = {k: v[0] for k, v in parse_qs(request.content.decode(), keep_blank_values=True).items()}
+            users, i = [], 0
+            while f"users__{i}__paid_share" in form:
+                email = form.get(f"users__{i}__email")
+                if not (email and drop_new_people):
+                    uid = int(form.get(f"users__{i}__user_id") or 500 + i)
+                    users.append({
+                        "user_id": uid, "user": {"id": uid, "email": email},
+                        "paid_share": form[f"users__{i}__paid_share"], "owed_share": form[f"users__{i}__owed_share"],
+                    })
+                i += 1
             expense = {
                 "id": 999 + len(store), "description": form["description"], "cost": form["cost"],
                 "currency_code": form["currency_code"], "details": form["details"],
                 "group_id": int(form["group_id"]) or None, "created_at": "2026-11-14T12:00:00Z", "deleted_at": None,
+                "users": users,
             }
             store.append(expense)
-            return httpx2.Response(200, json={"expenses": [{"id": expense["id"]}], "errors": {}})
+            return httpx2.Response(200, json={"expenses": [expense], "errors": {}})
         return httpx2.Response(404)
 
     return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
@@ -153,6 +178,16 @@ async def test_find_people_reports_match_ambiguous_and_none():
     assert zed["status"] == "none" and zed["candidates"] == []
 
 
+def test_name_lookup_ignores_accents_case_and_spacing():
+    d = Directory(
+        me_id=1,
+        contacts={1: Contact(id=1, name="Ann A", is_me=True), 7: Contact(id=7, name="José  Álvarez", friend=True)},
+        groups={},
+    )
+    results = find_people(d, ["jose", "JOSE alvarez", "Álvarez", "Jose Alvarez"]).results
+    assert [(m.status, m.candidates[0].id) for m in results] == [("match", 7)] * 4
+
+
 # ---------------------------------------------------------------- mapping checks
 
 
@@ -163,6 +198,7 @@ async def test_find_people_reports_match_ambiguous_and_none():
     ({"Ann": 1, "Bob": 2}, 1234, "group_id 1234 is not one of your Splitwise groups"),
     ({"Ann": 1, "Bob": 1}, 0, "all map to the same Splitwise user"),
     ({"Ann": 1, "Bob": "ANN@x.test"}, 0, "all map to the same Splitwise user"),
+    ({"Ann": 1, "Bob": "newbie@x.test"}, 77, "Splitwise leaves new people out of group expenses"),
 ])
 async def test_bad_mappings_are_refused_before_anything_is_posted(members, group_id, expected):
     calls = []
@@ -283,6 +319,17 @@ def test_confirmation_expires_and_is_bound_to_the_account_and_secret():
     assert "not the one that was previewed" in Confirmer("x" * 40).problem(code, form, "tok", now=1000)
 
 
+async def test_add_reports_when_splitwise_saves_something_different():
+    # Real Splitwise returned success but left a new person out; the user must hear about it.
+    calls = []
+    async with Client(server(calls, drop_new_people=True)) as c:
+        r = await preview_and_add(c, members={"Ann": 1, "Bob": "newbie@x.test"})
+    text = error_text(r)
+    assert "Added as Splitwise expense 999, but Splitwise saved it differently" in text
+    assert "Bob was left out" in text and "Do not add it again" in text
+    assert len(creates(calls)) == 1
+
+
 async def test_splitwise_errors_surface():
     calls = []
     async with Client(server(calls, errors={"base": ["Invalid user"]})) as c:
@@ -323,6 +370,39 @@ async def test_reparsed_receipt_still_matches():
         await preview_and_add(c)
         again = await preview_and_add(c, receipt=reparsed, paid_by="bob", members={"ann": 1, "bob": "2"}, description="Dinner")
     assert "duplicate" in error_text(again)
+    assert len(creates(calls)) == 1
+
+
+async def test_confirmation_is_single_use():
+    # Even with allow_duplicate, one approved preview adds one expense.
+    calls = []
+    async with Client(server(calls)) as c:
+        p = await preview(c)
+        first = await c.call_tool("add_expense_to_splitwise", {**args(), "confirmation": p["confirmation"]})
+        again = await c.call_tool(
+            "add_expense_to_splitwise", {**args(), "confirmation": p["confirmation"], "allow_duplicate": True}
+        )
+    assert not first.is_error, first.content
+    assert "confirmation was already used" in error_text(again)
+    assert len(creates(calls)) == 1
+
+
+async def test_racing_adds_with_one_confirmation_post_once():
+    # Both pass the duplicate check before either has posted; the single-use claim stops the second.
+    calls = []
+    gate = {"hold": 0}
+    async with Client(server(calls, gate=gate)) as c:
+        p = await preview(c)
+        gate["hold"] = 2
+        results = []
+
+        async def add():
+            results.append(await c.call_tool("add_expense_to_splitwise", {**args(), "confirmation": p["confirmation"]}))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(add)
+            tg.start_soon(add)
+    assert sorted(r.is_error for r in results) == [False, True]
     assert len(creates(calls)) == 1
 
 

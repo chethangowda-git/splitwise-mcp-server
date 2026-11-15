@@ -10,13 +10,15 @@ account, so the server doesn't take the mapping on trust:
   an id must be the user, a friend, or a member of one of their groups (of the target
   group, for a group expense), and two receipt names can't be the same person. An
   email that belongs to a contact resolves to that contact; an unknown email is
-  allowed and flagged, because Splitwise invites that address.
+  allowed and flagged outside groups, because Splitwise invites that address, and
+  refused in groups, because Splitwise silently leaves that person out.
 """
 
 from __future__ import annotations
 
 import difflib
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -30,7 +32,9 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _norm(s: str) -> str:
-    return " ".join(s.casefold().split())
+    """Case-, accent-, and spacing-insensitive form: "  José  ÁLVAREZ" -> "jose alvarez"."""
+    decomposed = unicodedata.normalize("NFKD", s.casefold())
+    return " ".join("".join(ch for ch in decomposed if not unicodedata.combining(ch)).split())
 
 
 class Contact(BaseModel):
@@ -185,6 +189,14 @@ def resolve_members(
         elif EMAIL_RE.match(text):
             c = d.by_email(text)
             if c is None:
+                if group is not None:
+                    # Splitwise accepts this but silently drops the new person from the expense.
+                    problems.append(
+                        f"'{name}' -> {text} is not on Splitwise yet, and Splitwise leaves new people out of "
+                        f"group expenses. Add them to the group '{group[0]}' in Splitwise first, or add this "
+                        "expense outside any group (group_id 0)."
+                    )
+                    continue
                 out[name] = ResolvedPerson(receipt_name=name, email=text, new_to_splitwise=True)
                 continue
         else:

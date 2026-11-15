@@ -150,3 +150,54 @@ def build_preview(
         summary="\n".join(lines),
         confirmation=confirmation,
     )
+
+
+def saved_differences(prepared: PreparedExpense, expense: dict[str, Any]) -> list[str]:
+    """How the expense Splitwise saved differs from the one we sent; empty if it matches.
+
+    Splitwise can return success yet change an expense (it drops a new person from a
+    group expense), so add checks the saved shares against the previewed ones.
+    """
+    form = prepared.form
+    names = {str(r.splitwise_ref).casefold(): name for name, r in prepared.resolved.items()}
+    saved = expense.get("users")
+    if saved is None:
+        return ["Splitwise did not return the saved shares, so they could not be checked"]
+
+    def amount(x: Any) -> Decimal:
+        return Decimal(str(x or 0))
+
+    problems = []
+    if amount(expense.get("cost")) != amount(form["cost"]):
+        problems.append(f"the total is {expense.get('cost')}, not {form['cost']}")
+    matched: set[int] = set()
+    i = 0
+    while f"users__{i}__paid_share" in form:
+        uid, email = form.get(f"users__{i}__user_id"), form.get(f"users__{i}__email", "").casefold()
+        who = names.get((uid or email).casefold(), uid or email)
+        found = next(
+            (
+                (k, u) for k, u in enumerate(saved)
+                if k not in matched and (
+                    (uid and str(u.get("user_id")) == uid)
+                    or (email and str((u.get("user") or {}).get("email") or "").casefold() == email)
+                )
+            ),
+            None,
+        )
+        if found is None:
+            problems.append(f"{who} was left out")
+        else:
+            k, u = found
+            matched.add(k)
+            paid, owed = amount(form[f"users__{i}__paid_share"]), amount(form[f"users__{i}__owed_share"])
+            if (amount(u.get("paid_share")), amount(u.get("owed_share"))) != (paid, owed):
+                problems.append(
+                    f"{who} paid {u.get('paid_share')} and owes {u.get('owed_share')}, not paid {paid} and owes {owed}"
+                )
+        i += 1
+    for k, u in enumerate(saved):
+        if k not in matched:
+            user = u.get("user") or {}
+            problems.append(f"{user.get('first_name') or u.get('user_id')} was added with share {u.get('owed_share')}")
+    return problems

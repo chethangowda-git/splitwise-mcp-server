@@ -22,8 +22,8 @@ from .allocation import ROUNDING_METHOD, AllocationError, allocate
 from .models import AllocationResult, Receipt, Reconciliation, SplitResult
 from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToken, SplitwiseOAuthProvider
 from .split import SplitError, reconcile, split
-from .confirm import Confirmer
-from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense
+from .confirm import CONFIRM_TTL, Confirmer
+from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense, saved_differences
 from .people import Directory, PeopleSearch, find_people
 from .splitwise_api import (
     CreatedExpense,
@@ -33,7 +33,7 @@ from .splitwise_api import (
     find_duplicate,
     list_people,
 )
-from .store import RedisStore, Store
+from .store import MemoryStore, RedisStore, Store
 
 log = logging.getLogger(__name__)
 
@@ -82,11 +82,13 @@ def create_server(
         user's token when oauth is set. Splitwise tools are registered only when
         one of the two is given.
     http: optional shared HTTP client for calls to Splitwise (used by tests).
-    store: OAuth replay/revocation store. Defaults to Redis when oauth.redis_url is
-        set, otherwise in memory.
+    store: OAuth replay/revocation and used-confirmation store. Defaults to Redis
+        when oauth.redis_url is set, otherwise in memory.
     """
     if store is None and oauth is not None and oauth.redis_url:
         store = RedisStore.from_url(oauth.redis_url)
+    if store is None:
+        store = MemoryStore()
     provider = SplitwiseOAuthProvider(oauth, http, store) if oauth else None
     mcp = MCPServer(
         name="splitwise-mcp-server",
@@ -295,9 +297,23 @@ def create_server(
                     "and owed shares. If the user confirms this is a separate expense, call again "
                     "with allow_duplicate=true."
                 )
+            # A preview approves one expense: two adds racing on the same code, or a retry
+            # after a lost response, can't both post. The second gets a fresh preview, which
+            # then reports the first as a duplicate.
+            if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
+                raise ToolError(
+                    "Not added: this preview's confirmation was already used. Call "
+                    "preview_splitwise_expense again; it will show whether the expense is already in Splitwise."
+                )
             expense = await sw.create_expense(prepared.form)
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
+        if differences := saved_differences(prepared, expense):
+            raise ToolError(
+                f"Added as Splitwise expense {expense['id']}, but Splitwise saved it differently from the "
+                "preview: " + "; ".join(differences) + ". Tell the user, and have them fix or delete it in "
+                "Splitwise. Do not add it again."
+            )
         result = prepared.result
         return CreatedExpense(
             expense_id=expense["id"],
