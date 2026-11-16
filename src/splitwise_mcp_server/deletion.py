@@ -24,6 +24,12 @@ class ExpenseShare(BaseModel):
     owes: Decimal
 
 
+class BalanceEffect(BaseModel):
+    name: str
+    user_id: int
+    amount: Decimal = Field(description="How this expense changed what they owe you: + they owe you more, - less")
+
+
 class ExpenseInfo(BaseModel):
     id: int
     description: str
@@ -37,10 +43,18 @@ class ExpenseInfo(BaseModel):
     added_at: str | None = None
     payment: bool = Field(default=False, description="A settle-up payment, not an expense; can't be deleted here")
     shares: list[ExpenseShare]
+    effect_on_you: list[BalanceEffect] = Field(
+        default_factory=list, description="Per person, how this expense moved your balance with them"
+    )
 
 
 class ExpenseList(BaseModel):
     expenses: list[ExpenseInfo] = Field(description="Most recent first; deleted expenses left out")
+    friend_total: dict[str, Decimal] | None = Field(
+        default=None,
+        description="With friend_id: these expenses' combined effect on what that friend owes you, per currency. "
+        "Equals your balance with them when the list covers all of their expenses.",
+    )
 
 
 class DeletionPreview(BaseModel):
@@ -69,6 +83,7 @@ def expense_info(e: dict[str, Any], *, me_id: int, group_names: dict[int, str]) 
         added_by_you=creator.get("id") == me_id,
         added_at=(e.get("created_at") or "")[:10] or None,
         payment=bool(e.get("payment")),
+        effect_on_you=_effects(e, me_id),
         shares=[
             ExpenseShare(
                 name=_name(u.get("user")),
@@ -79,6 +94,24 @@ def expense_info(e: dict[str, Any], *, me_id: int, group_names: dict[int, str]) 
             for u in e.get("users") or []
         ],
     )
+
+
+def _effects(e: dict[str, Any], me_id: int) -> list[BalanceEffect]:
+    """From Splitwise's repayments ("from owes to"), how this expense moved each balance with the user."""
+    names = {u.get("user_id"): _name(u.get("user")) for u in e.get("users") or []}
+    totals: dict[int, Decimal] = {}
+    for r in e.get("repayments") or []:
+        amount = Decimal(str(r.get("amount") or 0))
+        if r.get("to") == me_id:
+            other, signed = r.get("from"), amount
+        elif r.get("from") == me_id:
+            other, signed = r.get("to"), -amount
+        else:
+            continue
+        totals[other] = totals.get(other, Decimal(0)) + signed
+    return [
+        BalanceEffect(name=names.get(uid, str(uid)), user_id=uid, amount=amt) for uid, amt in totals.items() if amt
+    ]
 
 
 def deletion_problem(e: dict[str, Any], me_id: int) -> str | None:

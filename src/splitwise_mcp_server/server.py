@@ -36,6 +36,13 @@ from .deletion import (
 )
 from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense, saved_differences
 from .people import Directory, PeopleSearch, find_people
+from .settlements import (
+    Direction,
+    SettlementPreview,
+    prepare_settlement,
+    saved_payment_problem,
+    settlement_summary,
+)
 from .splitwise_api import (
     CreatedExpense,
     SplitwiseClient,
@@ -77,6 +84,12 @@ To delete an expense: find it with list_splitwise_expenses (confirm with the use
 one if there is any doubt), call preview_splitwise_deletion and show its summary, and
 call delete_splitwise_expense only after the user explicitly approves. Only expenses
 the user added can be deleted.
+
+To record a settle-up payment: check the balance with get_splitwise_balances, call
+preview_splitwise_settlement and show its summary, and call record_splitwise_settlement
+only after the user explicitly approves. Only record money the user says has actually
+changed hands. To explain how a balance adds up, use list_splitwise_expenses with
+friend_id (and group_id).
 """
 
 TokenSource = Callable[[], str | None]
@@ -363,23 +376,36 @@ def create_server(
         return me["id"], {g["id"]: g.get("name") or "" for g in await sw.groups() if g.get("id")}
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
-    async def list_splitwise_expenses(group_id: int | None = None, limit: int = 20) -> ExpenseList:
-        """Recent Splitwise expenses (most recent first), to find one the user is talking about.
+    async def list_splitwise_expenses(
+        group_id: int | None = None, friend_id: int | None = None, limit: int = 20
+    ) -> ExpenseList:
+        """Expense history, most recent first: use it to find an expense, or to explain how a balance adds up.
 
-        group_id: only that group's expenses (omit for all). limit: 1 to 50.
-        Each expense says who added it; only ones the user added can be deleted.
+        group_id: only that group's expenses. friend_id: only expenses shared with that
+        person (combine both for one friend within one group). limit: 1 to 100.
+        Each expense lists its shares, who added it, whether it's a settle-up payment, and
+        effect_on_you: how it moved your balance with each person. With friend_id,
+        friend_total sums those effects, which explains a balance from
+        get_splitwise_balances when the list reaches back far enough.
         """
-        if not 1 <= limit <= 50:
-            raise ToolError("limit must be between 1 and 50")
+        if not 1 <= limit <= 100:
+            raise ToolError("limit must be between 1 and 100")
         sw = client()
         try:
             me_id, names = await _expense_context(sw)
-            raw = await sw.recent_expenses(group_id=group_id, limit=limit)
+            raw = await sw.recent_expenses(group_id=group_id, friend_id=friend_id, limit=limit)
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
-        return ExpenseList(
-            expenses=[expense_info(e, me_id=me_id, group_names=names) for e in raw if not e.get("deleted_at")]
-        )
+        rows = [expense_info(e, me_id=me_id, group_names=names) for e in raw if not e.get("deleted_at")]
+        total = None
+        if friend_id is not None:
+            rows = [r for r in rows if any(s.user_id == friend_id for s in r.shares)]
+            total = {}
+            for r in rows:
+                for eff in r.effect_on_you:
+                    if eff.user_id == friend_id:
+                        total[r.currency] = total.get(r.currency, Decimal(0)) + eff.amount
+        return ExpenseList(expenses=rows, friend_total=total)
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def preview_splitwise_deletion(expense_id: int) -> DeletionPreview:
@@ -441,6 +467,84 @@ def create_server(
             )
         info = expense_info(e, me_id=me_id, group_names=names)
         return DeletionPreview(expense=info, summary="Deleted.\n" + deletion_summary(info), confirmation="")
+
+    async def _prepare_settlement(
+        friend_id: int, amount: str, direction: Direction, group_id: int, currency: str
+    ) -> tuple[str, SplitwiseClient, Any]:
+        token = current_token()
+        sw = SplitwiseClient(token, http)
+        try:
+            prepared = await prepare_settlement(
+                sw, friend_id=friend_id, amount=amount, direction=direction, group_id=group_id, currency=currency
+            )
+        except (ValueError, SplitwiseError) as e:
+            raise ToolError(str(e)) from e
+        return token, sw, prepared
+
+    def _settlement_preview(prepared: Any, confirmation: str, summary: str) -> SettlementPreview:
+        return SettlementPreview(
+            friend_id=prepared.friend_id, friend_name=prepared.friend_name, direction=prepared.direction,
+            amount=prepared.amount, currency=prepared.currency, group_id=prepared.group_id,
+            group_name=prepared.group_name, balance_before=prepared.balance_before,
+            balance_after=prepared.balance_after, likely_duplicate_of=prepared.duplicate_of,
+            summary=summary, confirmation=confirmation,
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def preview_splitwise_settlement(
+        friend_id: int, amount: str, direction: Direction, group_id: int = 0, currency: str = "USD"
+    ) -> SettlementPreview:
+        """Show a settle-up payment before recording it, with the balance before and after. Records nothing.
+
+        friend_id: the other person (from find_splitwise_people). amount: e.g. "25.70".
+        direction: "they_paid_me" or "i_paid_them". group_id: the group the balance is in
+        (0 = outside groups). Refuses a payment larger than what's owed that way.
+        """
+        token, _, prepared = await _prepare_settlement(friend_id, amount, direction, group_id, currency)
+        return _settlement_preview(prepared, confirmer.sign(prepared.form, token), settlement_summary(prepared))
+
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=True))
+    async def record_splitwise_settlement(
+        friend_id: int,
+        amount: str,
+        direction: Direction,
+        confirmation: str,
+        group_id: int = 0,
+        currency: str = "USD",
+        allow_duplicate: bool = False,
+    ) -> SettlementPreview:
+        """Record a settle-up payment the user approved in preview_splitwise_settlement.
+
+        Same arguments as the preview, plus its confirmation (single-use, 30 minutes).
+        allow_duplicate: only if the user confirms a reported matching payment is separate.
+        Checks what Splitwise saved.
+        """
+        token, sw, prepared = await _prepare_settlement(friend_id, amount, direction, group_id, currency)
+        if problem := confirmer.problem(confirmation, prepared.form, token):
+            raise ToolError(
+                f"Not recorded: {problem}. Call preview_splitwise_settlement with these arguments, show the "
+                "user its summary, and pass its confirmation once they approve."
+            )
+        if prepared.duplicate_of and not allow_duplicate:
+            raise ToolError(
+                f"Not recorded: payment {prepared.duplicate_of} from the last 7 days matches this one. If the user "
+                "confirms this is a separate payment, call again with allow_duplicate=true."
+            )
+        if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
+            raise ToolError("Not recorded: this preview's confirmation was already used.")
+        try:
+            saved = await sw.create_expense(prepared.form)
+        except SplitwiseError as e:
+            raise ToolError(str(e)) from e
+        log.info("recorded payment expense_id=%s", saved.get("id"))
+        if problem := saved_payment_problem(prepared, saved):
+            raise ToolError(
+                f"Recorded as Splitwise expense {saved.get('id')}, but {problem}. Tell the user to check it in the "
+                "Splitwise app. Do not record it again."
+            )
+        return _settlement_preview(
+            prepared, "", f"Recorded (Splitwise id {saved.get('id')}).\n" + settlement_summary(prepared)
+        )
 
     _log_tool_use(mcp)
     return mcp

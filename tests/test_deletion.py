@@ -95,7 +95,7 @@ async def test_list_marks_who_added_each_and_skips_deleted():
 async def test_list_limit_is_bounded():
     async with Client(FakeSplitwise().server()) as c:
         r = await c.call_tool("list_splitwise_expenses", {"limit": 500})
-    assert r.is_error and "between 1 and 50" in text(r)
+    assert r.is_error and "between 1 and 100" in text(r)
 
 
 async def test_preview_then_delete_your_own_expense():

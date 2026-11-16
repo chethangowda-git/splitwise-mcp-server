@@ -84,10 +84,14 @@ class SplitwiseClient:
     async def expense(self, expense_id: int) -> dict[str, Any]:
         return (await self._request("GET", f"/get_expense/{int(expense_id)}"))["expense"]
 
-    async def recent_expenses(self, *, group_id: int | None, limit: int) -> list[dict[str, Any]]:
+    async def recent_expenses(
+        self, *, group_id: int | None, limit: int, friend_id: int | None = None
+    ) -> list[dict[str, Any]]:
         params = {"limit": str(limit)}
         if group_id is not None:
             params["group_id"] = str(group_id)
+        elif friend_id is not None:  # Splitwise ignores friend_id when group_id is given
+            params["friend_id"] = str(friend_id)
         return (await self._request("GET", "/get_expenses", params=params))["expenses"]
 
     async def delete_expense(self, expense_id: int) -> None:
