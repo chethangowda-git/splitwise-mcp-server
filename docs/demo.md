@@ -21,7 +21,7 @@ Any account can sign in. Only the account that registered the Splitwise app need
 ## Before you record
 
 - Sign in once beforehand, so the video doesn't open on the login screens.
-- Use a group made for the demo, with one friend who knows it's a demo. **They get real Splitwise notifications.** This script uses the group `testing` with Srujan.
+- Use a group made for the demo, with one friend who knows it's a demo. **They get real Splitwise notifications.** This script uses a group called `testing` and a friend called Sam; use your own.
 - Hide anything personal: other chats, email addresses, the friends list, other groups.
 - Have the Splitwise app or website open next to ChatGPT, on the `testing` group.
 
@@ -48,20 +48,22 @@ Screenshot this to use as the photo:
 
 ## Shot list
 
+The amounts assume the AI calls you "Me" (or your name) and your friend "Sam". With other names, a cent may move between you, because rounding ties go alphabetically. The total is always $57.17.
+
 | # | Time | You type | What should happen | Point it makes |
 |---|---|---|---|---|
-| 1 | 0:00 | *(attach the receipt)* "Split this with Srujan. We shared the pizza and knots equally, the salad was mine, the beer was his." | ChatGPT calls `reconcile_receipt`. It says the receipt adds up to $57.17 and asks how to share the $2.99 delivery fee. | It checks the math first, and **asks instead of guessing**. |
-| 2 | 0:15 | "Equally." | `split_receipt`: **you $31.11 · Srujan $26.06**. | Exact cents. Tax and tip follow what each person ordered. |
+| 1 | 0:00 | *(attach the receipt)* "Split this with Sam. We shared the pizza and knots equally, the salad was mine, the beer was his." | ChatGPT calls `reconcile_receipt`. It says the receipt adds up to $57.17 and asks how to share the $2.99 delivery fee. | It checks the math first, and **asks instead of guessing**. |
+| 2 | 0:15 | "Equally." | `split_receipt`: **you $31.11 · Sam $26.06**. | Exact cents. Tax and tip follow what each person ordered. |
 | 3 | 0:25 | "I paid. Add it to Splitwise in the testing group as Dinner at Luigi's." | `find_splitwise_people`, then `preview_splitwise_expense`. ChatGPT shows exactly what will be added (real Splitwise names, each share, the group) and asks you to approve. | **It never guesses a person**, and nothing is added without a preview. |
 | 4 | 0:40 | "Yes." | `add_expense_to_splitwise` with the preview's one-time code. | The add only works with the approved preview. |
-| 5 | 0:45 | *(switch to Splitwise)* | The expense is there: Srujan owes $26.06, with the item breakdown in the notes. | It's real, not a mock. |
+| 5 | 0:45 | *(switch to Splitwise)* | The expense is there: Sam owes $26.06, with the item breakdown in the notes. | It's real, not a mock. |
 | 6 | 0:55 | "Add it again." | It reports a duplicate of the expense just added. Nothing is added. | **Safe to retry.** |
-| 7 | 1:05 | "How much does Srujan owe me in testing, and why?" | `get_splitwise_balances`, then `list_splitwise_expenses` for Srujan. The total, then each expense's effect, adding up to it. | Balances are explained line by line, not just stated. |
-| 8 | 1:25 | "He just paid me back all of it. Record it." | `preview_splitwise_settlement`: *"Srujan paid you … Now: Srujan owes you … After: settled up."* | You see the before and after first. |
+| 7 | 1:05 | "How much does Sam owe me in testing, and why?" | `get_splitwise_balances`, then `list_splitwise_expenses` for Sam. The total, then each expense's effect, adding up to it. | Balances are explained line by line, not just stated. |
+| 8 | 1:25 | "He just paid me back all of it. Record it." | `preview_splitwise_settlement`: *"Sam paid you … Now: Sam owes you … After: settled up."* | You see the before and after first. |
 | 9 | 1:35 | "Yes." | `record_splitwise_settlement`. In Splitwise, a settle-up payment appears and the group shows settled. | Settle-ups get the same checks as expenses. |
 | 10 | 1:45 | *(optional)* "Actually the total on the receipt was 58.17." | It reports a $1.00 difference and won't split until that's explained. | A misread is never absorbed into someone's share. |
 
-At step 8, the amount is whatever Srujan owes in the group at that point: the dinner's $26.06 plus anything already there. Record a settlement only when the money has really changed hands, or delete the payment afterwards.
+At step 8, the amount is whatever Sam owes in the group at that point: the dinner's $26.06 plus anything already there. Record a settlement only when the money has really changed hands, or delete the payment afterwards.
 
 ## Recording tips
 
