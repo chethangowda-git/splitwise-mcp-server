@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
 
 import httpx2
 
@@ -22,6 +24,7 @@ from .allocation import ROUNDING_METHOD, AllocationError, allocate
 from .models import AllocationResult, Receipt, Reconciliation, SplitResult
 from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToken, SplitwiseOAuthProvider
 from .split import SplitError, reconcile, split
+from .balances import Balances, get_balances
 from .confirm import CONFIRM_TTL, Confirmer
 from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense, saved_differences
 from .people import Directory, PeopleSearch, find_people
@@ -59,6 +62,8 @@ Workflow:
    arguments plus the preview's confirmation. If anything changes, preview again.
 7. If the preview warns about a duplicate, tell the user. Pass allow_duplicate=true
    only if they confirm it is a separate expense.
+
+For "who owes me" or "how much do I owe" questions, call get_splitwise_balances.
 """
 
 TokenSource = Callable[[], str | None]
@@ -206,6 +211,21 @@ def create_server(
             raise ToolError(str(e)) from e
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def get_splitwise_balances(group_id: int | None = None) -> Balances:
+        """Who owes the signed-in user and whom they owe, from Splitwise's own balances.
+
+        group_id: only balances in that group (0 = expenses outside any group);
+            omit for everything.
+
+        Positive amounts mean the other person owes the user. Totals are per currency,
+        never added across currencies. Includes expenses added in the Splitwise app.
+        """
+        try:
+            return await get_balances(client(), group_id)
+        except (ValueError, SplitwiseError) as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def find_splitwise_people(names: list[str]) -> PeopleSearch:
         """Look up names (or emails) among the user, their friends, and their groups' members.
 
@@ -325,7 +345,31 @@ def create_server(
             owed={p.person: p.total for p in result.people if p.total},
         )
 
+    _log_tool_use(mcp)
     return mcp
+
+
+def _log_tool_use(mcp: MCPServer) -> None:
+    """Log each tool call (name, outcome, duration) and tool listing. Never arguments or results."""
+    call_tool, list_tools = mcp.call_tool, mcp.list_tools
+
+    async def logged_call_tool(name: str, arguments: dict, *args: Any, **kwargs: Any) -> Any:
+        start = time.monotonic()
+        outcome = "error"
+        try:
+            result = await call_tool(name, arguments, *args, **kwargs)
+            outcome = "ok"
+            return result
+        finally:
+            log.info("tool=%s outcome=%s ms=%d", name, outcome, (time.monotonic() - start) * 1000)
+
+    async def logged_list_tools(*args: Any, **kwargs: Any) -> Any:
+        tools = await list_tools(*args, **kwargs)
+        log.info("list_tools -> %s", ",".join(sorted(t.name for t in tools)))
+        return tools
+
+    mcp.call_tool = logged_call_tool  # type: ignore[method-assign]
+    mcp.list_tools = logged_list_tools  # type: ignore[method-assign]
 
 
 def oauth_config_from_env() -> OAuthConfig | None:
@@ -347,6 +391,26 @@ def oauth_config_from_env() -> OAuthConfig | None:
     )
 
 
+def load_ssm_parameters(path: str) -> None:
+    """Copy SSM Parameter Store values under `path` into the environment (AWS Lambda).
+
+    /splitwise-mcp/SERVER_SECRET becomes $SERVER_SECRET. Variables already set win, so
+    secrets stay out of the function's configuration and live encrypted in SSM.
+    """
+    import boto3  # available in the AWS Lambda Python runtime
+
+    ssm = boto3.client("ssm")
+    token = None
+    while True:
+        kwargs = {"Path": path, "WithDecryption": True, **({"NextToken": token} if token else {})}
+        page = ssm.get_parameters_by_path(**kwargs)
+        for p in page["Parameters"]:
+            os.environ.setdefault(p["Name"].rsplit("/", 1)[-1], p["Value"])
+        token = page.get("NextToken")
+        if not token:
+            return
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="splitwise-mcp-server")
     parser.add_argument(
@@ -360,6 +424,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     if args.http or "PORT" in os.environ:
+        if ssm_path := os.environ.get("SSM_PARAMETER_PATH", "").strip():
+            load_ssm_parameters(ssm_path)
         oauth = oauth_config_from_env()
         if oauth is None:
             log.warning("Splitwise sign-in is not configured: serving calculation tools only, without auth.")
@@ -370,7 +436,10 @@ def main() -> None:
             )
         mcp = create_server(oauth)
         # Stateless: every request stands alone, so any replica can serve it.
-        mcp.run("streamable-http", host=args.host, port=args.port, stateless_http=True)
+        # MCP_JSON_RESPONSE=1 answers with plain JSON instead of an SSE stream, for hosts that
+        # buffer responses (AWS Lambda function URLs).
+        json_response = os.environ.get("MCP_JSON_RESPONSE", "").strip().lower() in ("1", "true", "yes")
+        mcp.run("streamable-http", host=args.host, port=args.port, stateless_http=True, json_response=json_response)
     else:
         # Local stdio: a personal API key (never used by the public HTTP server).
         api_key = os.environ.get("SPLITWISE_API_KEY", "").strip() or None

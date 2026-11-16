@@ -69,9 +69,10 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 | `list_splitwise_people` | Lists the signed-in user's Splitwise friends and groups, with ids. |
 | `find_splitwise_people` | Looks up names or emails among the user, their friends, and their groups' members. Each result is `match`, `ambiguous` (with every candidate's name and email), or `none` (with close suggestions). |
 | `preview_splitwise_expense` | Read-only. Shows exactly what would be added: the people as Splitwise knows them, each share, the group, and any likely duplicate. Returns a summary to show the user and a confirmation code. |
+| `get_splitwise_balances` | Read-only. Who owes the user and whom they owe, from Splitwise's own balances: totals per currency, each friend (by group), and who pays whom in each group. Optionally one group only. |
 | `add_expense_to_splitwise` | Records the previewed expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Needs the preview's confirmation code. Refuses if anything differs from the preview, a person doesn't check out against the user's contacts, or it looks like a duplicate (unless `allow_duplicate` is set). |
 
-The four Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
+The five Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
 
 ## Allocation rules
 
@@ -151,7 +152,7 @@ Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
-**Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable.
+**Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable. To keep the key out of client config, put it in `.env` (git-ignored) and point the client at `scripts/run-local.sh`, which loads `.env` and starts the server.
 
 ## Remote (HTTP) mode
 
@@ -165,11 +166,37 @@ HTTP mode is used automatically whenever `$PORT` is set. It binds `0.0.0.0`, run
 
 Without the Splitwise settings below, the HTTP endpoint has no authentication and serves only the calculation tools. With them, Claude and ChatGPT run the sign-in flow automatically when the connector is added.
 
+## AWS Lambda
+
+The production deployment runs on AWS Lambda, which costs nothing at personal usage (the Lambda free tier covers 1M requests a month) and sleeps when idle (a cold start takes about 3 s).
+
+```
+claude.ai / ChatGPT ──HTTPS──▶ Lambda function URL ──▶ Lambda Web Adapter ──▶ this server (uvicorn, :8080)
+                                                                               │
+                                         SSM Parameter Store (secrets) ◀───────┤ at startup
+                                         Upstash Redis (OAuth + preview state) ◀┘ per request
+```
+
+- **The same server, unchanged.** The [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) layer starts `deploy/lambda/run.sh`, waits for `/health`, and forwards each function URL request to the server. `MCP_JSON_RESPONSE=1` makes it answer with plain JSON instead of an event stream, which buffered function URLs need.
+- **Secrets stay out of the function's configuration.** They live as encrypted SecureString parameters under `/splitwise-mcp/`, and the server loads them at startup (`SSM_PARAMETER_PATH`). The function's role can read only that path.
+- **Redis** is [Upstash](https://upstash.com)'s free tier (use the `rediss://` URL, in the same region).
+- **Logs** go to CloudWatch for 14 days. Each tool call is logged by name, outcome, and duration, never its arguments or results.
+
+Deploy or update (needs the AWS CLI signed in, e.g. `aws login`; reads `SPLITWISE_CLIENT_ID`, `SPLITWISE_CLIENT_SECRET`, and optionally `REDIS_URL` from `.env`, and creates `SERVER_SECRET` once):
+
+```bash
+deploy/lambda/deploy.sh          # optional: FUNCTION=..., AWS_REGION=..., AWS_PROFILE=...
+```
+
+It's safe to re-run: it creates or updates the role, function, layer, function URL, and log retention, then prints the connector URL and the Splitwise callback URL. Set a zero-spend AWS budget alert; new accounts often can't cap the function's concurrency.
+
+**After adding a tool, refresh the connector.** Claude and ChatGPT keep the tool list from when the connector was added. In ChatGPT, refresh it in Settings → Apps & Connectors, or remove and re-add it.
+
 ## Splitwise sign-in (multi-user)
 
 When configured, everyone who adds the connector signs in with their own Splitwise account. The server is an OAuth authorization server for MCP clients (dynamic client registration + PKCE) and hands the actual login to Splitwise. Before sending users to Splitwise, it shows a consent page naming the requesting app and where the user will be redirected. All tools then require sign-in.
 
-Splitwise requires an active Splitwise Pro subscription to register an app and use its API. Only the account that registers the app needs it.
+Splitwise requires an active Splitwise Pro subscription to register an app and use its API. Only the account that registers the app needs it: an account without Pro has been tested signing in through the app, reading its balances, and adding expenses. If the registering account's Pro lapses, the app (and so every user's connection) may stop working.
 
 1. Register an app at https://secure.splitwise.com/apps and set its callback URL to `https://<your-domain>/oauth/splitwise/callback`.
 2. Set these environment variables (on Railway: service → **Variables**):
@@ -198,4 +225,4 @@ That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory
 .venv/bin/pytest
 ```
 
-The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, single-use confirmation codes including racing adds, exact posted shares, checking what Splitwise saved, duplicates, pagination, error handling), and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
+The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, single-use confirmation codes including racing adds, exact posted shares, checking what Splitwise saved, duplicates, pagination, error handling, balances per currency and per group), tool-call logging (names only, never arguments), loading secrets from SSM, and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
