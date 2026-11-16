@@ -21,7 +21,8 @@ ChatGPT / Claude ──MCP over HTTPS──▶ AWS Lambda function URL
 ```
 
 - **Stateless by design.** Each user's Splitwise token lives only inside their own encrypted OAuth token (Fernet, keyed from a server secret). There's no user database. The only shared state is what OAuth requires remembering (used codes, rotated refresh tokens, revocations) plus used confirmation codes. It lives in Redis and expires on its own.
-- **Serverless at no cost.** The unchanged web server runs on Lambda behind AWS's Web Adapter, with plain-JSON MCP responses because buffered function URLs can't stream. At personal usage it's within the free tier. The cost is a cold start of about 3 s.
+- **Infrastructure as code.** `template.yaml` (AWS SAM / CloudFormation) defines the function, its public URL, a least-privilege role, the log group, and the published issuer URL; `sam deploy` creates or updates it and `sam delete` removes it.
+- **Serverless within the free tier.** The unchanged web server runs on Lambda behind AWS's Web Adapter, with plain-JSON MCP responses because buffered function URLs can't stream. At personal usage it stays within the AWS free tier. The cost is a cold start of about 3 s.
 
 ## Decisions that matter
 

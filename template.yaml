@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  splitwise-mcp-server: an MCP connector (ChatGPT / Claude) for splitting receipts and
+  managing Splitwise, served from a public Lambda function URL. The unchanged web server
+  runs behind the AWS Lambda Web Adapter. Secrets are SSM SecureString parameters under
+  SsmPath, created by deploy/secrets.sh (CloudFormation can't create SecureStrings).
+
+Parameters:
+  SsmPath:
+    Type: String
+    Default: /splitwise-mcp
+    AllowedPattern: "^/[A-Za-z0-9_.-]+$"
+    Description: Parameter Store path holding SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET, SERVER_SECRET, REDIS_URL.
+  WebAdapterLayerVersion:
+    Type: Number
+    Default: 30
+    Description: Version of the public LambdaAdapterLayerArm64 layer (github.com/awslabs/aws-lambda-web-adapter).
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  # The server. run.sh starts uvicorn on :8080; the Web Adapter (the /opt/bootstrap exec
+  # wrapper from the layer) waits for /health, then forwards each request to it.
+  ServerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: splitwise-mcp-server (MCP over streamable HTTP, plain-JSON responses)
+      CodeUri: build/lambda/pkg # built by deploy/lambda/build.sh (Linux arm64 wheels)
+      Handler: run.sh
+      Runtime: python3.13
+      Architectures: [arm64]
+      MemorySize: 1024
+      Timeout: 30
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerArm64:${WebAdapterLayerVersion}
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_PORT: "8080"
+          PORT: "8080"
+          AWS_LWA_READINESS_CHECK_PATH: /health
+          MCP_JSON_RESPONSE: "1" # buffered function URLs can't stream SSE
+          SSM_PARAMETER_PATH: !Ref SsmPath # secrets (and PUBLIC_URL below) load from here at startup
+      # Public, because the app does its own OAuth: /mcp without a valid token gets 401.
+      # SAM adds both permissions a public URL needs (InvokeFunctionUrl, and InvokeFunction via the URL).
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
+      # Least privilege: read only this app's parameters.
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [ssm:GetParametersByPath, ssm:GetParameter]
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPath}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmPath}/*
+
+  # The OAuth issuer URL is the function URL itself. Publishing it as a parameter (rather
+  # than an environment variable) avoids a Function -> Url -> Function cycle.
+  PublicUrlParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub ${SsmPath}/PUBLIC_URL
+      Type: String
+      Value: !GetAtt ServerFunctionUrl.FunctionUrl
+      Description: Public base URL of the MCP server (OAuth issuer). Managed by CloudFormation.
+
+  ServerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ServerFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+Outputs:
+  ConnectorUrl:
+    Description: Add this as the connector URL in ChatGPT or Claude.
+    Value: !Sub ${ServerFunctionUrl.FunctionUrl}mcp
+  SplitwiseCallbackUrl:
+    Description: Set this as the Callback URL of your app at secure.splitwise.com/apps.
+    Value: !Sub ${ServerFunctionUrl.FunctionUrl}oauth/splitwise/callback
+  FunctionName:
+    Value: !Ref ServerFunction

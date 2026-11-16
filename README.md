@@ -192,7 +192,7 @@ Without the Splitwise settings below, the HTTP endpoint has no authentication an
 
 ## AWS Lambda
 
-The production deployment runs on AWS Lambda, which costs nothing at personal usage (the Lambda free tier covers 1M requests a month) and sleeps when idle (a cold start takes about 3 s).
+The production deployment runs on AWS Lambda, defined as infrastructure as code in [`template.yaml`](template.yaml) (AWS SAM / CloudFormation). At personal usage it stays within the AWS free tier, and it sleeps when idle (a cold start takes about 3 s).
 
 ```
 claude.ai / ChatGPT ──HTTPS──▶ Lambda function URL ──▶ Lambda Web Adapter ──▶ this server (uvicorn, :8080)
@@ -201,18 +201,28 @@ claude.ai / ChatGPT ──HTTPS──▶ Lambda function URL ──▶ Lambda We
                                          Upstash Redis (OAuth + preview state) ◀┘ per request
 ```
 
-- **The same server, unchanged.** The [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) layer starts `deploy/lambda/run.sh`, waits for `/health`, and forwards each function URL request to the server. `MCP_JSON_RESPONSE=1` makes it answer with plain JSON instead of an event stream, which buffered function URLs need.
-- **Secrets stay out of the function's configuration.** They live as encrypted SecureString parameters under `/splitwise-mcp/`, and the server loads them at startup (`SSM_PARAMETER_PATH`). The function's role can read only that path.
-- **Redis** is [Upstash](https://upstash.com)'s free tier (use the `rediss://` URL, in the same region).
-- **Logs** go to CloudWatch for 14 days. Each tool call is logged by name, outcome, and duration, never its arguments or results.
+What the template defines:
 
-Deploy or update (needs the AWS CLI signed in, e.g. `aws login`; reads `SPLITWISE_CLIENT_ID`, `SPLITWISE_CLIENT_SECRET`, and optionally `REDIS_URL` from `.env`, and creates `SERVER_SECRET` once):
+| Resource | Purpose |
+|---|---|
+| `ServerFunction` | Python 3.13 on arm64, 1 GB memory, 30 s timeout, with the [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter) layer, which starts `deploy/lambda/run.sh`, waits for `/health`, and forwards each request to the server. `MCP_JSON_RESPONSE=1` makes the server answer with plain JSON instead of an event stream, which buffered function URLs need. |
+| Function URL | Public HTTPS endpoint (`AuthType: NONE`, buffered). The app does its own OAuth: `/mcp` without a valid token gets 401. |
+| IAM role (inline policy) | Least privilege: read only this app's parameters under `/splitwise-mcp/`. |
+| `PublicUrlParameter` | Publishes the function URL as `/splitwise-mcp/PUBLIC_URL`, the OAuth issuer, which the server loads at startup. Using a parameter rather than an environment variable avoids a function → URL → function dependency cycle. |
+| `ServerLogs` | CloudWatch log group, kept 14 days. Each tool call is logged by name, outcome, and duration, never its arguments or results. |
+
+**Secrets** are encrypted SecureString parameters under `/splitwise-mcp/`, loaded at startup (`SSM_PARAMETER_PATH`), so none sits in the function's configuration. CloudFormation can't create SecureStrings, so `deploy/secrets.sh` stores them: `SPLITWISE_CLIENT_ID`, `SPLITWISE_CLIENT_SECRET`, and `REDIS_URL` from `.env`, plus a generated `SERVER_SECRET`, created once and never replaced. **Redis** is [Upstash](https://upstash.com)'s free tier (use the `rediss://` URL, in the same region).
+
+Deploy (needs the AWS CLI signed in, e.g. `aws login`, and the [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html)):
 
 ```bash
-deploy/lambda/deploy.sh          # optional: FUNCTION=..., AWS_REGION=..., AWS_PROFILE=...
+deploy/secrets.sh        # once, or after changing a secret
+deploy/lambda/build.sh   # package the server with Linux arm64 wheels into build/lambda/pkg
+sam deploy               # create or update the stack (settings in samconfig.toml)
+sam delete               # remove everything the stack created
 ```
 
-It's safe to re-run: it creates or updates the role, function, layer, function URL, and log retention, then prints the connector URL and the Splitwise callback URL. Set a zero-spend AWS budget alert; new accounts often can't cap the function's concurrency.
+`sam deploy` prints the connector URL and the Splitwise callback URL. Set a zero-spend AWS budget alert; new accounts often can't cap the function's concurrency.
 
 **After adding a tool, refresh the connector.** Claude and ChatGPT keep the tool list from when the connector was added. In ChatGPT, refresh it in Settings → Apps & Connectors, or remove and re-add it.
 
@@ -223,7 +233,7 @@ When configured, everyone who adds the connector signs in with their own Splitwi
 Splitwise requires an active Splitwise Pro subscription to register an app and use its API. Only the account that registers the app needs it: an account without Pro has been tested signing in through the app, reading its balances, and adding expenses. If the registering account's Pro lapses, the app (and so every user's connection) may stop working.
 
 1. Register an app at https://secure.splitwise.com/apps and set its callback URL to `https://<your-domain>/oauth/splitwise/callback`.
-2. Set these environment variables. On AWS Lambda, `deploy/lambda/deploy.sh` stores them as encrypted SSM parameters for you (see [AWS Lambda](#aws-lambda)); on Railway, use service → **Variables**.
+2. Set these environment variables. On AWS Lambda, `deploy/secrets.sh` stores them as encrypted SSM parameters and the SAM template sets `PUBLIC_URL` (see [AWS Lambda](#aws-lambda)); on Railway, use service → **Variables**.
 
 | Variable | Value |
 |---|---|

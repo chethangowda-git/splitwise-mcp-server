@@ -1,0 +1,13 @@
+# sam deploy settings. Build first: deploy/lambda/build.sh (see README → AWS Lambda).
+version = 0.1
+
+[default.global.parameters]
+stack_name = "splitwise-mcp"
+
+[default.deploy.parameters]
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+s3_prefix = "splitwise-mcp"
+confirm_changeset = false
+fail_on_empty_changeset = false
