@@ -8,7 +8,7 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 
 ## Use it
 
-- **ChatGPT:** in Developer mode, go to **Settings → Apps & Connectors → Create**. Enter the server's URL (`https://<your-function-url>/mcp`) with OAuth authentication, then connect and sign in with Splitwise. Full steps: [docs/demo.md](docs/demo.md#use-it-in-chatgpt).
+- **ChatGPT:** in Developer mode, go to **Settings → Apps & Connectors → Create**. Enter the server's URL (`https://<your-function-url>/mcp`) with OAuth authentication, then connect and sign in with Splitwise. Full steps: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md).
 - **Claude:** **Settings → Connectors → Add custom connector** with the same URL (on plans with custom connectors). Or run it locally over stdio with your own API key (see [Setup](#setup)).
 
 Either way, each person signs in with their own Splitwise account. After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added.
@@ -17,30 +17,40 @@ Either way, each person signs in with their own Splitwise account. After the ser
 
 > **You:** *(photo of a receipt)* Split this between me, Bob, and Cara. Bob and I shared the pizza, he had 2 of the 3 slices. Knots were for everyone, the salad was Cara's, the lemonade mine, the beer Bob's.
 >
-> **Claude:** The receipt adds up to $57.44. How should the $2.99 delivery fee be shared: equally, in proportion to what each person ordered, or some other way?
+> **AI:** The receipt adds up to $57.44. How should the $2.99 delivery fee be shared: equally, in proportion to what each person ordered, or some other way?
 >
 > **You:** Equally.
 >
-> **Claude:** Ann $15.11 · Bob $25.79 · Cara $16.54 (total $57.44). Tax and tip follow what each person ordered, after the $5 promo.
+> **AI:** Ann $15.11 · Bob $25.79 · Cara $16.54 (total $57.44). Tax and tip follow what each person ordered, after the $5 promo.
 >
 > **You:** I paid. Add it to Splitwise.
 >
-> **Claude:** You have two Bobs in Splitwise: Bob Smith (bob.smith@…) and Bob Lee (blee@…). Which one?
+> **AI:** You have two Bobs in Splitwise: Bob Smith (bob.smith@…) and Bob Lee (blee@…). Which one?
 >
 > **You:** Bob Smith.
 >
-> **Claude:** Here's what I'll add:
+> **AI:** Here's what I'll add:
 > "Dinner at Luigi's": 57.44 USD, outside any group. Paid by Ann (you).
 > Ann (you) owes 15.11 · Bob Smith owes 25.79 · Cara Diaz owes 16.54.
 > Add it?
 >
 > **You:** Yes.
 >
-> **Claude:** Added. Bob owes you $25.79 and Cara owes you $16.54.
+> **AI:** Added. Bob owes you $25.79 and Cara owes you $16.54.
 >
 > **You:** Add it again.
 >
-> **Claude:** That's already in Splitwise (same date, total, and shares), so I didn't add a second copy.
+> **AI:** That's already in Splitwise (same date, total, and shares), so I didn't add a second copy.
+>
+> **You:** Bob paid me back.
+>
+> **AI:** Here's the payment I'll record:
+> Bob Smith paid you 25.79 USD, outside any group. Now: Bob Smith owes you 25.79 USD. After: settled up.
+> Record it?
+>
+> **You:** Yes.
+>
+> **AI:** Recorded. You and Bob are settled up.
 
 ## How it works
 
@@ -213,7 +223,7 @@ When configured, everyone who adds the connector signs in with their own Splitwi
 Splitwise requires an active Splitwise Pro subscription to register an app and use its API. Only the account that registers the app needs it: an account without Pro has been tested signing in through the app, reading its balances, and adding expenses. If the registering account's Pro lapses, the app (and so every user's connection) may stop working.
 
 1. Register an app at https://secure.splitwise.com/apps and set its callback URL to `https://<your-domain>/oauth/splitwise/callback`.
-2. Set these environment variables (on Railway: service → **Variables**):
+2. Set these environment variables. On AWS Lambda, `deploy/lambda/deploy.sh` stores them as encrypted SSM parameters for you (see [AWS Lambda](#aws-lambda)); on Railway, use service → **Variables**.
 
 | Variable | Value |
 |---|---|

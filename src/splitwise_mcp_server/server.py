@@ -11,7 +11,6 @@ from decimal import Decimal
 from typing import Any
 
 import httpx2
-
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -21,9 +20,6 @@ from starlette.responses import JSONResponse
 
 from . import __version__
 from .allocation import ROUNDING_METHOD, AllocationError, allocate
-from .models import AllocationResult, Receipt, Reconciliation, SplitResult
-from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToken, SplitwiseOAuthProvider
-from .split import SplitError, reconcile, split
 from .balances import Balances, get_balances
 from .confirm import CONFIRM_TTL, Confirmer
 from .deletion import (
@@ -34,7 +30,21 @@ from .deletion import (
     deletion_summary,
     expense_info,
 )
-from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense, saved_differences
+from .expenses import (
+    ExpensePreview,
+    PreparedExpense,
+    build_preview,
+    prepare_expense,
+    saved_differences,
+)
+from .models import AllocationResult, Receipt, Reconciliation, SplitResult
+from .oauth import (
+    CALLBACK_PATH,
+    CONSENT_PATH,
+    OAuthConfig,
+    SplitwiseAccessToken,
+    SplitwiseOAuthProvider,
+)
 from .people import Directory, PeopleSearch, find_people
 from .settlements import (
     Direction,
@@ -43,6 +53,7 @@ from .settlements import (
     saved_payment_problem,
     settlement_summary,
 )
+from .split import SplitError, reconcile, split
 from .splitwise_api import (
     CreatedExpense,
     SplitwiseClient,

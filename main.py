@@ -1,4 +1,4 @@
-"""Run the server from a source checkout without installing it (used by Railway)."""
+"""Run the server from a source checkout without installing it (used by AWS Lambda and Railway)."""
 
 import sys
 from pathlib import Path
