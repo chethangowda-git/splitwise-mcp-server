@@ -6,6 +6,13 @@ Split a receipt by chatting with Claude or ChatGPT, get everyone's share to the 
 
 This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatGPT call a *connector*. The AI does the fuzzy work: it reads the receipt photo and asks who had what. This server does the work that has to be exact: it checks that the receipt adds up, splits every line by explicit rules, refuses to guess when something is ambiguous, and posts one expense to Splitwise.
 
+## Use it
+
+- **ChatGPT:** in Developer mode, go to **Settings → Apps & Connectors → Create**. Enter the server's URL (`https://<your-function-url>/mcp`) with OAuth authentication, then connect and sign in with Splitwise. Full steps: [docs/demo.md](docs/demo.md#use-it-in-chatgpt).
+- **Claude:** **Settings → Connectors → Add custom connector** with the same URL (on plans with custom connectors). Or run it locally over stdio with your own API key (see [Setup](#setup)).
+
+Either way, each person signs in with their own Splitwise account. After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added.
+
 ## What it looks like
 
 > **You:** *(photo of a receipt)* Split this between me, Bob, and Cara. Bob and I shared the pizza, he had 2 of the 3 slices. Knots were for everyone, the salad was Cara's, the lemonade mine, the beer Bob's.
