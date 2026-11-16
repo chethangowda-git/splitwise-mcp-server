@@ -81,6 +81,21 @@ class SplitwiseClient:
             params["group_id"] = str(group_id)
         return (await self._request("GET", "/get_expenses", params=params))["expenses"]
 
+    async def expense(self, expense_id: int) -> dict[str, Any]:
+        return (await self._request("GET", f"/get_expense/{int(expense_id)}"))["expense"]
+
+    async def recent_expenses(self, *, group_id: int | None, limit: int) -> list[dict[str, Any]]:
+        params = {"limit": str(limit)}
+        if group_id is not None:
+            params["group_id"] = str(group_id)
+        return (await self._request("GET", "/get_expenses", params=params))["expenses"]
+
+    async def delete_expense(self, expense_id: int) -> None:
+        body = await self._request("POST", f"/delete_expense/{int(expense_id)}")
+        # 200 OK is not success on its own: only `success: true` is.
+        if not body.get("success") or body.get("errors"):
+            raise SplitwiseError(f"Splitwise did not delete expense {expense_id}: {body.get('errors') or body}")
+
     async def create_expense(self, form: dict[str, str]) -> dict[str, Any]:
         body = await self._request("POST", "/create_expense", data=form)
         # 200 OK is not success on its own: the call failed if `errors` is non-empty.

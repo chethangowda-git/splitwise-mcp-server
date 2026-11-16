@@ -26,6 +26,14 @@ from .oauth import CALLBACK_PATH, CONSENT_PATH, OAuthConfig, SplitwiseAccessToke
 from .split import SplitError, reconcile, split
 from .balances import Balances, get_balances
 from .confirm import CONFIRM_TTL, Confirmer
+from .deletion import (
+    DeletionPreview,
+    ExpenseList,
+    deletion_fingerprint,
+    deletion_problem,
+    deletion_summary,
+    expense_info,
+)
 from .expenses import ExpensePreview, PreparedExpense, build_preview, prepare_expense, saved_differences
 from .people import Directory, PeopleSearch, find_people
 from .splitwise_api import (
@@ -64,6 +72,11 @@ Workflow:
    only if they confirm it is a separate expense.
 
 For "who owes me" or "how much do I owe" questions, call get_splitwise_balances.
+
+To delete an expense: find it with list_splitwise_expenses (confirm with the user which
+one if there is any doubt), call preview_splitwise_deletion and show its summary, and
+call delete_splitwise_expense only after the user explicitly approves. Only expenses
+the user added can be deleted.
 """
 
 TokenSource = Callable[[], str | None]
@@ -344,6 +357,90 @@ def create_server(
             paid_by=paid_by,
             owed={p.person: p.total for p in result.people if p.total},
         )
+
+    async def _expense_context(sw: SplitwiseClient) -> tuple[int, dict[int, str]]:
+        me = await sw.current_user()
+        return me["id"], {g["id"]: g.get("name") or "" for g in await sw.groups() if g.get("id")}
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def list_splitwise_expenses(group_id: int | None = None, limit: int = 20) -> ExpenseList:
+        """Recent Splitwise expenses (most recent first), to find one the user is talking about.
+
+        group_id: only that group's expenses (omit for all). limit: 1 to 50.
+        Each expense says who added it; only ones the user added can be deleted.
+        """
+        if not 1 <= limit <= 50:
+            raise ToolError("limit must be between 1 and 50")
+        sw = client()
+        try:
+            me_id, names = await _expense_context(sw)
+            raw = await sw.recent_expenses(group_id=group_id, limit=limit)
+        except SplitwiseError as e:
+            raise ToolError(str(e)) from e
+        return ExpenseList(
+            expenses=[expense_info(e, me_id=me_id, group_names=names) for e in raw if not e.get("deleted_at")]
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    async def preview_splitwise_deletion(expense_id: int) -> DeletionPreview:
+        """Show exactly which expense would be deleted, and get a confirmation code. Deletes nothing.
+
+        Refuses expenses the user didn't add, settle-up payments, and already-deleted
+        ones. Show the summary
+        to the user and get an explicit yes before calling delete_splitwise_expense.
+        """
+        token = current_token()
+        sw = SplitwiseClient(token, http)
+        try:
+            me_id, names = await _expense_context(sw)
+            e = await sw.expense(expense_id)
+        except SplitwiseError as err:
+            raise ToolError(str(err)) from err
+        if problem := deletion_problem(e, me_id):
+            raise ToolError(f"Can't delete: {problem}.")
+        info = expense_info(e, me_id=me_id, group_names=names)
+        return DeletionPreview(
+            expense=info,
+            summary=deletion_summary(info),
+            confirmation=confirmer.sign(deletion_fingerprint(e), token),
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
+    async def delete_splitwise_expense(expense_id: int, confirmation: str) -> DeletionPreview:
+        """Delete one expense the user added, after they approved its preview.
+
+        confirmation: from preview_splitwise_deletion for this expense_id. Refuses if the
+        expense changed after the preview, the preview is over 30 minutes old or was
+        already used, the user didn't add the expense, or it's a settle-up payment.
+        Checks afterwards that Splitwise really deleted it. Returns what was deleted.
+        """
+        token = current_token()
+        sw = SplitwiseClient(token, http)
+        try:
+            me_id, names = await _expense_context(sw)
+            e = await sw.expense(expense_id)
+            if problem := deletion_problem(e, me_id):
+                raise ToolError(f"Not deleted: {problem}.")
+            if problem := confirmer.problem(confirmation, deletion_fingerprint(e), token):
+                raise ToolError(
+                    f"Not deleted: {problem}. Call preview_splitwise_deletion again, show the user its "
+                    "summary, and pass its confirmation once they approve."
+                )
+            if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
+                raise ToolError("Not deleted: this preview's confirmation was already used.")
+            await sw.delete_expense(expense_id)
+            log.info("deleted expense_id=%d", int(expense_id))
+            # Like adds, don't trust the status alone: check Splitwise really deleted it.
+            after = await sw.expense(expense_id)
+        except SplitwiseError as err:
+            raise ToolError(str(err)) from err
+        if not after.get("deleted_at"):
+            raise ToolError(
+                f"Splitwise reported expense {expense_id} as deleted, but it still shows as active. "
+                "Tell the user to check it in the Splitwise app. Do not retry without a new preview."
+            )
+        info = expense_info(e, me_id=me_id, group_names=names)
+        return DeletionPreview(expense=info, summary="Deleted.\n" + deletion_summary(info), confirmation="")
 
     _log_tool_use(mcp)
     return mcp
