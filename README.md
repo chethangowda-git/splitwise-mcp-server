@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/fdc9f888-d070-4c87-b752-a3e27957d150
+
 # splitwise-mcp-server
 
 Split a receipt by chatting with Claude or ChatGPT, get everyone's share to the exact cent, and record it in Splitwise.
