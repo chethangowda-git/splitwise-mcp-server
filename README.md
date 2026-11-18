@@ -1,12 +1,8 @@
-
-
-https://github.com/user-attachments/assets/fdc9f888-d070-4c87-b752-a3e27957d150
-
 # splitwise-mcp-server
 
 Split a receipt by chatting with Claude or ChatGPT, get everyone's share to the exact cent, and record it in Splitwise.
 
-<!-- Demo video: add the link here once it's recorded (see docs/demo.md). -->
+https://github.com/user-attachments/assets/fdc9f888-d070-4c87-b752-a3e27957d150
 
 This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatGPT call a *connector*. The AI does the fuzzy work: it reads the receipt photo and asks who had what. This server does the work that has to be exact: it checks that the receipt adds up, splits every line by explicit rules, refuses to guess when something is ambiguous, and posts one expense to Splitwise.
 
@@ -25,9 +21,14 @@ https://xdic6hbarjoa6btpgkc6fc3jwu0oaxor.lambda-url.us-east-1.on.aws/mcp
   4. In a new chat, turn the connector on from the **+** menu and try: *"How much do my friends owe me on Splitwise?"*
 - **Claude** (plans with custom connectors): **Settings → Connectors → Add custom connector**, paste the same URL, and connect.
 
-You sign in with your own Splitwise account; you don't need Splitwise Pro. The hosted server allows **5 changes per account** (adding an expense, deleting one, or recording a settle-up); reading balances, explaining them, and splitting receipts are unlimited. Want more? [Message me on LinkedIn](https://www.linkedin.com/in/chethangowdagt/). Nothing is changed in your Splitwise without a preview you approve. The server keeps no database: your Splitwise access lives only inside your own encrypted sign-in token, and logs record tool names, never what you asked or your data. You can revoke access anytime in your Splitwise account settings.
+**Good to know:**
 
-After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added. More detail: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md). To host your own instead, see [AWS Lambda](#aws-lambda) and [Splitwise sign-in](#splitwise-sign-in-multi-user).
+- **Your own account.** You sign in with your own Splitwise account; you don't need Splitwise Pro.
+- **5 changes per account** on the hosted server: adding an expense, deleting one, or recording a settle-up. Reading balances, explaining them, and splitting receipts are unlimited. Want more? [Message me on LinkedIn](https://www.linkedin.com/in/chethangowdagt/).
+- **Nothing changes without your approval.** Every change is shown as a preview first.
+- **Private by design.** No database: your Splitwise access lives only inside your own encrypted sign-in token, and logs record tool names, never what you asked or your data. Revoke access anytime in your Splitwise account settings.
+
+After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added. More detail: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md). To run your own server instead, see [Host your own](#host-your-own).
 
 ## What it looks like
 
@@ -80,20 +81,14 @@ After the server gains new tools, refresh or re-add the connector: clients keep 
                                      add expense      ──────── create_expense ─▶
 ```
 
-## Design decisions
+## Known limits
 
-- **Exact money, rounding only where it must happen.** Amounts are `Decimal` at the edges and exact `Fraction`s inside, so a third is exactly a third. Each item, discount, tax, tip, and fee is rounded once, with the largest-remainder method and ties broken by name. Every component's shares add up to that component exactly, so everyone's totals add up to the printed total, and the same input always gives the same split. Rounding each person's total instead can gain or lose a cent.
-- **Check the receipt before splitting it.** If the parsed lines don't add up to the printed total, the server reports the difference and stops. A misread line is never quietly absorbed into someone's share.
-- **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
-- **Never guess a person.** Name lookup reports one match, several, or none, and never picks between several. Before anything is previewed or posted, the server checks every person against the user's own Splitwise contacts: an id must be the user, a friend, or a member of the target group, and two names on the receipt can't be the same person. A wrong or made-up id is refused rather than posted.
-- **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes and usable once. If anything changes after the preview, the add is refused.
-- **A per-user change limit for the shared server.** Each Splitwise account gets a fixed number of changes. A slot is taken atomically just before the write, so racing writes can't both pass the limit, and handed back if Splitwise rejects it. Previews check it first, so nobody goes through a whole preview only to be refused.
-- **Settling up is guarded too.** A payment can't exceed what's owed in that direction, needs an approved preview, and a matching payment from the last week is reported as a likely double-record.
-- **Deleting is as guarded as adding.** Only expenses the user added, one per approved preview; the preview's code covers the expense as it was, so an edit in between voids it, and the server re-reads the expense afterwards to confirm the delete.
-- **Check what Splitwise actually saved.** Splitwise can return success and still change an expense (it silently drops a new person from a group expense). After every add, the server compares the saved shares with the previewed ones and reports any difference instead of claiming success.
-- **Duplicate protection without a database.** Each expense carries a fingerprint in its Splitwise notes. Before adding one, the server looks for that fingerprint in recent expenses, so Splitwise itself is the record.
-- **Multi-user sign-in without a user database.** The server is a full OAuth 2.1 authorization server (dynamic client registration, PKCE, single-use codes, refresh token rotation with replay detection, revocation) that hands the actual login to Splitwise. Tokens are encrypted and self-contained. The only server-side state is the short-lived record OAuth requires, kept in Redis.
-- **A consent page before Splitwise.** Anyone can register an OAuth client with any redirect address, and Splitwise's own screen only names this server. The consent page shows which app is asking and where the user will be sent, so a crafted link can't quietly hand someone's account to a stranger.
+- Expenses created in the Splitwise app (no `ref` line) aren't detected as duplicates.
+- One payer per expense; "I paid $30 and Bob paid $20" isn't supported.
+- Someone outside the target group is refused rather than added to it; add them to the group in Splitwise first. A new person (an email Splitwise doesn't know) can only be added to an expense outside any group, because Splitwise leaves new people out of group expenses.
+- Name lookup ignores case, accents, and spacing, but not nicknames ("Mike" won't find "Michael"); the AI asks instead.
+- No editing expenses, and deleting is limited to expenses you added (not other people's, not settle-up payments), one at a time. Deleted expenses can be restored in the Splitwise app; this server has no restore.
+- The server makes the preview mandatory, but can't force the AI to show it; the client's own approval prompt for the add tool is the backstop.
 
 ## Tools
 
@@ -114,6 +109,21 @@ After the server gains new tools, refresh or re-add the connector: clients keep 
 | `add_expense_to_splitwise` | Records the previewed expense: the payer's paid share is the full cost, and everyone's owed share is their exact total. Needs the preview's confirmation code. Refuses if anything differs from the preview, a person doesn't check out against the user's contacts, or it looks like a duplicate (unless `allow_duplicate` is set). |
 
 The Splitwise tools only appear when Splitwise is configured (see [Splitwise sign-in](#splitwise-sign-in-multi-user)).
+
+## Design decisions
+
+- **Exact money, rounding only where it must happen.** Amounts are `Decimal` at the edges and exact `Fraction`s inside, so a third is exactly a third. Each item, discount, tax, tip, and fee is rounded once, with the largest-remainder method and ties broken by name. Every component's shares add up to that component exactly, so everyone's totals add up to the printed total, and the same input always gives the same split. Rounding each person's total instead can gain or lose a cent.
+- **Check the receipt before splitting it.** If the parsed lines don't add up to the printed total, the server reports the difference and stops. A misread line is never quietly absorbed into someone's share.
+- **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
+- **Never guess a person.** Name lookup reports one match, several, or none, and never picks between several. Before anything is previewed or posted, the server checks every person against the user's own Splitwise contacts: an id must be the user, a friend, or a member of the target group, and two names on the receipt can't be the same person. A wrong or made-up id is refused rather than posted.
+- **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes and usable once. If anything changes after the preview, the add is refused.
+- **A per-user change limit for the shared server.** Each Splitwise account gets a fixed number of changes. A slot is taken atomically just before the write, so racing writes can't both pass the limit, and handed back if Splitwise rejects it. Previews check it first, so nobody goes through a whole preview only to be refused.
+- **Settling up is guarded too.** A payment can't exceed what's owed in that direction, needs an approved preview, and a matching payment from the last week is reported as a likely double-record.
+- **Deleting is as guarded as adding.** Only expenses the user added, one per approved preview; the preview's code covers the expense as it was, so an edit in between voids it, and the server re-reads the expense afterwards to confirm the delete.
+- **Check what Splitwise actually saved.** Splitwise can return success and still change an expense (it silently drops a new person from a group expense). After every add, the server compares the saved shares with the previewed ones and reports any difference instead of claiming success.
+- **Duplicate protection without a database.** Each expense carries a fingerprint in its Splitwise notes. Before adding one, the server looks for that fingerprint in recent expenses, so Splitwise itself is the record.
+- **Multi-user sign-in without a user database.** The server is a full OAuth 2.1 authorization server (dynamic client registration, PKCE, single-use codes, refresh token rotation with replay detection, revocation) that hands the actual login to Splitwise. Tokens are encrypted and self-contained. The only server-side state is the short-lived record OAuth requires, kept in Redis.
+- **A consent page before Splitwise.** Anyone can register an OAuth client with any redirect address, and Splitwise's own screen only names this server. The consent page shows which app is asking and where the user will be sent, so a crafted link can't quietly hand someone's account to a stranger.
 
 ## Allocation rules
 
@@ -156,16 +166,11 @@ Each expense the server adds gets a fingerprint line (`ref: swmcp-…`) in its n
 
 Two adds racing on the same preview can't both post: each confirmation code is single-use.
 
-## Known limits
+## Host your own
 
-- Expenses created in the Splitwise app (no `ref` line) aren't detected as duplicates.
-- One payer per expense; "I paid $30 and Bob paid $20" isn't supported.
-- Someone outside the target group is refused rather than added to it; add them to the group in Splitwise first. A new person (an email Splitwise doesn't know) can only be added to an expense outside any group, because Splitwise leaves new people out of group expenses.
-- Name lookup ignores case, accents, and spacing, but not nicknames ("Mike" won't find "Michael"); the AI asks instead.
-- No editing expenses, and deleting is limited to expenses you added (not other people's, not settle-up payments), one at a time. Deleted expenses can be restored in the Splitwise app; this server has no restore.
-- The server makes the preview mandatory, but can't force the AI to show it; the client's own approval prompt for the add tool is the backstop.
+The hosted server above is the easiest way in. To run your own, locally or on your own AWS account, you need a Splitwise app registered from an account with Splitwise Pro.
 
-## Setup
+### Setup
 
 ```bash
 python3 -m venv .venv
@@ -195,7 +200,7 @@ Claude Desktop (`claude_desktop_config.json`):
 
 **Local use with your own account:** in stdio mode, set `SPLITWISE_API_KEY` to a personal API key (from your app's page at secure.splitwise.com/apps) to enable the Splitwise tools. The HTTP server ignores this variable. To keep the key out of client config, put it in `.env` (git-ignored) and point the client at `scripts/run-local.sh`, which loads `.env` and starts the server.
 
-## Remote (HTTP) mode
+### Remote (HTTP) mode
 
 ```bash
 splitwise-mcp-server --http --port 8000   # MCP endpoint: http://localhost:8000/mcp
@@ -203,11 +208,11 @@ splitwise-mcp-server --http --port 8000   # MCP endpoint: http://localhost:8000/
 
 HTTP mode is used automatically whenever `$PORT` is set. It binds `0.0.0.0`, runs stateless, and serves `GET /health` for health checks.
 
-**Railway:** `railway.json` sets the start command (`python main.py --http`, which runs from source with no install step) and the health check. `requirements.txt` lists the runtime dependencies, and `.python-version` pins Python. Keep `requirements.txt` in sync with `pyproject.toml`. After a deploy, generate a public domain under the service's **Settings → Networking**. The connector URL is `https://<your-domain>/mcp`. Use that URL for Claude custom connectors and ChatGPT developer-mode connectors.
+**Other hosts:** any platform that runs a Python web service works. For example, `railway.json` configures [Railway](https://railway.com) (start command and health check, using `requirements.txt`, which must stay in sync with `pyproject.toml`). The connector URL is `https://<your-domain>/mcp`.
 
 Without the Splitwise settings below, the HTTP endpoint has no authentication and serves only the calculation tools. With them, Claude and ChatGPT run the sign-in flow automatically when the connector is added.
 
-## AWS Lambda
+### AWS Lambda
 
 The production deployment runs on AWS Lambda, defined as infrastructure as code in [`template.yaml`](template.yaml) (AWS SAM / CloudFormation). At personal usage it stays within the AWS free tier, and it sleeps when idle (a cold start takes about 3 s).
 
@@ -243,7 +248,7 @@ sam delete               # remove everything the stack created
 
 **After adding a tool, refresh the connector.** Claude and ChatGPT keep the tool list from when the connector was added. In ChatGPT, refresh it in Settings → Apps & Connectors, or remove and re-add it.
 
-## Splitwise sign-in (multi-user)
+### Splitwise sign-in (multi-user)
 
 When configured, everyone who adds the connector signs in with their own Splitwise account. The server is an OAuth authorization server for MCP clients (dynamic client registration + PKCE) and hands the actual login to Splitwise. Before sending users to Splitwise, it shows a consent page naming the requesting app and where the user will be redirected. All tools then require sign-in.
 

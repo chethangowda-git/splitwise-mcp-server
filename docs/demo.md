@@ -70,5 +70,5 @@ At step 8, the amount is whatever Sam owes in the group at that point: the dinne
 - macOS: **Cmd+Shift+5** → record a selected portion. Put ChatGPT and Splitwise side by side.
 - ChatGPT's "confirm this action" prompts are fine to show. They're the human-in-the-loop check.
 - Add captions from the "point it makes" column, or say them in a voiceover. Keep it under two minutes.
-- To host it: on GitHub, edit the README in the browser and drag the `.mp4` into the editor. GitHub uploads it and inserts a link. Put it where the README's demo comment is.
+- To host it: on GitHub, edit the README in the browser and drag the `.mp4` into the editor. GitHub uploads it and inserts a link that plays inline.
 - Afterwards, clean up in Splitwise: delete the demo expense and the settle-up payment.
