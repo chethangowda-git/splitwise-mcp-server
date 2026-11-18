@@ -8,10 +8,22 @@ This is an [MCP](https://modelcontextprotocol.io) server, which Claude and ChatG
 
 ## Use it
 
-- **ChatGPT:** in Developer mode, go to **Settings → Apps & Connectors → Create**. Enter the server's URL (`https://<your-function-url>/mcp`) with OAuth authentication, then connect and sign in with Splitwise. Full steps: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md).
-- **Claude:** **Settings → Connectors → Add custom connector** with the same URL (on plans with custom connectors). Or run it locally over stdio with your own API key (see [Setup](#setup)).
+A hosted server is running. Add it as a connector with this URL:
 
-Either way, each person signs in with their own Splitwise account. After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added.
+```
+https://xdic6hbarjoa6btpgkc6fc3jwu0oaxor.lambda-url.us-east-1.on.aws/mcp
+```
+
+- **ChatGPT** (paid plans, Developer mode):
+  1. **Settings → Apps & Connectors → Advanced settings →** turn on **Developer mode**.
+  2. **Apps & Connectors → Create**. Paste the URL above, choose **OAuth** authentication, and create it.
+  3. Click **Connect**, approve the consent page, then sign in to Splitwise and allow access.
+  4. In a new chat, turn the connector on from the **+** menu and try: *"How much do my friends owe me on Splitwise?"*
+- **Claude** (plans with custom connectors): **Settings → Connectors → Add custom connector**, paste the same URL, and connect.
+
+You sign in with your own Splitwise account; you don't need Splitwise Pro. Nothing is changed in your Splitwise without a preview you approve. The server keeps no database: your Splitwise access lives only inside your own encrypted sign-in token, and logs record tool names, never what you asked or your data. You can revoke access anytime in your Splitwise account settings.
+
+After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added. More detail: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md). To host your own instead, see [AWS Lambda](#aws-lambda) and [Splitwise sign-in](#splitwise-sign-in-multi-user).
 
 ## What it looks like
 

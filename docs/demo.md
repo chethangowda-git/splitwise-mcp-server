@@ -9,7 +9,7 @@ ChatGPT runs MCP servers as **connectors** in Developer mode, which is available
 1. **Settings → Apps & Connectors → Advanced settings →** turn on **Developer mode**.
 2. **Apps & Connectors → Create**:
    - **Name:** Splitwise receipt splitter
-   - **MCP server URL:** `https://<your-function-url>/mcp` (the `ConnectorUrl` that `sam deploy` prints)
+   - **MCP server URL:** `https://xdic6hbarjoa6btpgkc6fc3jwu0oaxor.lambda-url.us-east-1.on.aws/mcp` (or, if you host your own, the `ConnectorUrl` that `sam deploy` prints)
    - **Authentication:** OAuth
 3. Click **Connect**. A consent page names ChatGPT and where you'll be sent; approve it, then sign in to Splitwise and allow access.
 4. In a chat, turn the connector on from the **+** (tools) menu. ChatGPT asks before running any tool that changes data. That's on top of the server's own preview step.
