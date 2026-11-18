@@ -46,6 +46,7 @@ from .oauth import (
     SplitwiseOAuthProvider,
 )
 from .people import Directory, PeopleSearch, find_people
+from .quota import QuotaConfig, WriteQuota, quota_config_from_env
 from .settlements import (
     Direction,
     SettlementPreview,
@@ -116,6 +117,7 @@ def create_server(
     splitwise_token: TokenSource | None = None,
     http: httpx2.AsyncClient | None = None,
     store: Store | None = None,
+    quota: QuotaConfig | None = None,
 ) -> MCPServer:
     """Build the server.
 
@@ -126,6 +128,7 @@ def create_server(
     http: optional shared HTTP client for calls to Splitwise (used by tests).
     store: OAuth replay/revocation and used-confirmation store. Defaults to Redis
         when oauth.redis_url is set, otherwise in memory.
+    quota: limit each user's changes to Splitwise (adds, deletes, settle-ups). None = no limit.
     """
     if store is None and oauth is not None and oauth.redis_url:
         store = RedisStore.from_url(oauth.redis_url)
@@ -214,6 +217,16 @@ def create_server(
         return SplitwiseClient(current_token(), http)
 
     confirmer = Confirmer(oauth.server_secret if oauth else None)
+    writes = WriteQuota(store, quota)
+
+    async def quota_user(sw: SplitwiseClient) -> int | None:
+        """The Splitwise user id the change limit applies to (looked up only when there is a limit)."""
+        if not writes.enabled:
+            return None
+        try:
+            return int((await sw.current_user())["id"])
+        except SplitwiseError as e:
+            raise ToolError(str(e)) from e
 
     async def prepare(
         receipt: Receipt, paid_by: str, members: dict[str, int | str], description: str, group_id: int, date: str | None
@@ -293,6 +306,7 @@ def create_server(
         add_expense_to_splitwise requires.
         """
         token, prepared = await prepare(receipt, paid_by, members, description, group_id, date)
+        await writes.check(await quota_user(SplitwiseClient(token, http)), "added")
         try:
             duplicate = await find_duplicate(SplitwiseClient(token, http), prepared.form)
         except SplitwiseError as e:
@@ -357,12 +371,18 @@ def create_server(
             # A preview approves one expense: two adds racing on the same code, or a retry
             # after a lost response, can't both post. The second gets a fresh preview, which
             # then reports the first as a duplicate.
+            user = await quota_user(sw)
             if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
                 raise ToolError(
                     "Not added: this preview's confirmation was already used. Call "
                     "preview_splitwise_expense again; it will show whether the expense is already in Splitwise."
                 )
-            expense = await sw.create_expense(prepared.form)
+            await writes.take(user, "added")
+            try:
+                expense = await sw.create_expense(prepared.form)
+            except SplitwiseError:
+                await writes.give_back(user)
+                raise
         except SplitwiseError as e:
             raise ToolError(str(e)) from e
         if differences := saved_differences(prepared, expense):
@@ -435,6 +455,7 @@ def create_server(
             raise ToolError(str(err)) from err
         if problem := deletion_problem(e, me_id):
             raise ToolError(f"Can't delete: {problem}.")
+        await writes.check(me_id if writes.enabled else None, "deleted")
         info = expense_info(e, me_id=me_id, group_names=names)
         return DeletionPreview(
             expense=info,
@@ -465,7 +486,13 @@ def create_server(
                 )
             if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
                 raise ToolError("Not deleted: this preview's confirmation was already used.")
-            await sw.delete_expense(expense_id)
+            user = me_id if writes.enabled else None
+            await writes.take(user, "deleted")
+            try:
+                await sw.delete_expense(expense_id)
+            except SplitwiseError:
+                await writes.give_back(user)
+                raise
             log.info("deleted expense_id=%d", int(expense_id))
             # Like adds, don't trust the status alone: check Splitwise really deleted it.
             after = await sw.expense(expense_id)
@@ -511,7 +538,8 @@ def create_server(
         direction: "they_paid_me" or "i_paid_them". group_id: the group the balance is in
         (0 = outside groups). Refuses a payment larger than what's owed that way.
         """
-        token, _, prepared = await _prepare_settlement(friend_id, amount, direction, group_id, currency)
+        token, sw, prepared = await _prepare_settlement(friend_id, amount, direction, group_id, currency)
+        await writes.check(await quota_user(sw), "recorded")
         return _settlement_preview(prepared, confirmer.sign(prepared.form, token), settlement_summary(prepared))
 
     @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=True))
@@ -541,11 +569,14 @@ def create_server(
                 f"Not recorded: payment {prepared.duplicate_of} from the last 7 days matches this one. If the user "
                 "confirms this is a separate payment, call again with allow_duplicate=true."
             )
+        user = await quota_user(sw)
         if not await store.claim(confirmer.used_key(confirmation), CONFIRM_TTL):
             raise ToolError("Not recorded: this preview's confirmation was already used.")
+        await writes.take(user, "recorded")
         try:
             saved = await sw.create_expense(prepared.form)
         except SplitwiseError as e:
+            await writes.give_back(user)
             raise ToolError(str(e)) from e
         log.info("recorded payment expense_id=%s", saved.get("id"))
         if problem := saved_payment_problem(prepared, saved):
@@ -646,7 +677,10 @@ def main() -> None:
                 "REDIS_URL is not set: used codes, rotated refresh tokens, and revocations are kept in memory. "
                 "That is only correct for a single instance, and a restart forgets them."
             )
-        mcp = create_server(oauth)
+        quota = quota_config_from_env()
+        if quota is not None:
+            log.info("Change limit: %d per user, %d exempt", quota.limit, len(quota.exempt))
+        mcp = create_server(oauth, quota=quota)
         # Stateless: every request stands alone, so any replica can serve it.
         # MCP_JSON_RESPONSE=1 answers with plain JSON instead of an SSE stream, for hosts that
         # buffer responses (AWS Lambda function URLs).

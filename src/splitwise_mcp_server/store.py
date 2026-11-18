@@ -8,6 +8,7 @@ OAuth 2.1 still requires remembering three things, so they live here:
 - grants that were revoked (sign-out, or a detected replay).
 
 Each entry expires together with the token it describes, so the store stays small.
+Counters (per-user change limits, see quota.py) are the one thing kept without expiry.
 Use RedisStore when the server runs as more than one instance or must survive
 restarts; MemoryStore is for local runs, tests, and a single instance.
 """
@@ -30,6 +31,14 @@ class Store(Protocol):
 
     async def exists(self, key: str) -> bool: ...
 
+    async def incr(self, key: str) -> int:
+        """Atomically add 1 to the counter `key` (no expiry) and return the new value."""
+        ...
+
+    async def decr(self, key: str) -> None: ...
+
+    async def count(self, key: str) -> int: ...
+
 
 class MemoryStore:
     """In-process store. Safe under asyncio: no await between a check and its write."""
@@ -39,6 +48,7 @@ class MemoryStore:
     def __init__(self, clock: Callable[[], float] = time.monotonic):
         self._clock = clock
         self._expiry: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
 
     def _live(self, key: str) -> bool:
         exp = self._expiry.get(key)
@@ -67,6 +77,16 @@ class MemoryStore:
     async def exists(self, key: str) -> bool:
         return self._live(key)
 
+    async def incr(self, key: str) -> int:
+        self._counts[key] = self._counts.get(key, 0) + 1
+        return self._counts[key]
+
+    async def decr(self, key: str) -> None:
+        self._counts[key] = self._counts.get(key, 0) - 1
+
+    async def count(self, key: str) -> int:
+        return self._counts.get(key, 0)
+
 
 class RedisStore:
     """Shared store for several instances; entries survive restarts."""
@@ -89,3 +109,12 @@ class RedisStore:
 
     async def exists(self, key: str) -> bool:
         return bool(await self._r.exists(self._prefix + key))
+
+    async def incr(self, key: str) -> int:
+        return int(await self._r.incr(self._prefix + key))
+
+    async def decr(self, key: str) -> None:
+        await self._r.decr(self._prefix + key)
+
+    async def count(self, key: str) -> int:
+        return int(await self._r.get(self._prefix + key) or 0)

@@ -49,6 +49,7 @@ Every action that changes someone's Splitwise follows the same pattern:
 | Add an expense | A duplicate fingerprint in the expense notes, checked against recent expenses, so a retry or re-parse can't double-post. |
 | Delete an expense | Only expenses the user added, never settle-up payments. The code covers the expense's last-updated time, so an edit made in the app voids it. |
 | Record a settle-up | It can't exceed what's owed in that direction. A matching payment in the last 7 days is flagged as a likely double-record. |
+| All three, on the hosted server | Each account gets 5 changes. The count is an atomic Redis counter per Splitwise user, taken right before the write and handed back if Splitwise rejects it, so racing requests can't exceed it. |
 
 Each rule is **mutation-tested**: switch the check off, and a test fails.
 
@@ -67,7 +68,7 @@ Live tests ran only inside a dedicated test group, with small amounts labelled a
 
 ## Testing approach
 
-- **111 automated tests** run the MCP tools through a real MCP client, against a fake Splitwise and a full OAuth flow:
+- **120 automated tests** run the MCP tools through a real MCP client, against a fake Splitwise and a full OAuth flow:
   - rounding edge cases
   - reconciliation
   - name matching

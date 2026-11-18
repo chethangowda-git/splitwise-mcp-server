@@ -4,6 +4,9 @@
 #
 # Reads SPLITWISE_CLIENT_ID, SPLITWISE_CLIENT_SECRET and (optionally) REDIS_URL from .env.
 # Creates SERVER_SECRET once and never replaces it (that would sign everyone out).
+# Optional change limit for a shared server, also from .env: WRITE_QUOTA (changes per user),
+# QUOTA_EXEMPT_USER_IDS (comma-separated Splitwise user ids, e.g. yours), QUOTA_CONTACT
+# (where people ask for more). Unset in .env = left as they are in SSM.
 # Never prints a secret. Safe to re-run. Optional env: SSM_PATH, AWS_REGION, AWS_PROFILE.
 set -eu
 
@@ -31,3 +34,7 @@ for name in SPLITWISE_CLIENT_ID SPLITWISE_CLIENT_SECRET REDIS_URL; do
 done
 if exists SERVER_SECRET; then echo "$SSM_PATH/SERVER_SECRET already set (kept)"
 else put SERVER_SECRET "$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"; fi
+for name in WRITE_QUOTA QUOTA_EXEMPT_USER_IDS QUOTA_CONTACT; do
+  value="$(envval "$name")"
+  if [ -n "$value" ]; then put "$name" "$value"; fi
+done

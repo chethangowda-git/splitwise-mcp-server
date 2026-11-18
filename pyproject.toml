@@ -1,6 +1,6 @@
 [project]
 name = "splitwise-mcp-server"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that reconciles receipts and splits them fairly, to the exact cent."
 readme = "README.md"
 requires-python = ">=3.11"

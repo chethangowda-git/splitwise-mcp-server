@@ -21,7 +21,7 @@ https://xdic6hbarjoa6btpgkc6fc3jwu0oaxor.lambda-url.us-east-1.on.aws/mcp
   4. In a new chat, turn the connector on from the **+** menu and try: *"How much do my friends owe me on Splitwise?"*
 - **Claude** (plans with custom connectors): **Settings → Connectors → Add custom connector**, paste the same URL, and connect.
 
-You sign in with your own Splitwise account; you don't need Splitwise Pro. Nothing is changed in your Splitwise without a preview you approve. The server keeps no database: your Splitwise access lives only inside your own encrypted sign-in token, and logs record tool names, never what you asked or your data. You can revoke access anytime in your Splitwise account settings.
+You sign in with your own Splitwise account; you don't need Splitwise Pro. The hosted server allows **5 changes per account** (adding an expense, deleting one, or recording a settle-up); reading balances, explaining them, and splitting receipts are unlimited. Want more? [Message me on LinkedIn](https://www.linkedin.com/in/chethangowdagt/). Nothing is changed in your Splitwise without a preview you approve. The server keeps no database: your Splitwise access lives only inside your own encrypted sign-in token, and logs record tool names, never what you asked or your data. You can revoke access anytime in your Splitwise account settings.
 
 After the server gains new tools, refresh or re-add the connector: clients keep the tool list from when it was added. More detail: [docs/demo.md](docs/demo.md#use-it-in-chatgpt). How it was designed and what live testing found: [docs/how-it-was-built.md](docs/how-it-was-built.md). To host your own instead, see [AWS Lambda](#aws-lambda) and [Splitwise sign-in](#splitwise-sign-in-multi-user).
 
@@ -83,6 +83,7 @@ After the server gains new tools, refresh or re-add the connector: clients keep 
 - **Refuse to guess.** An item several people shared needs weights, or an explicit statement that it was split equally. A fee needs a rule for how it's shared. When something is missing, the server returns the question, and the AI asks the user.
 - **Never guess a person.** Name lookup reports one match, several, or none, and never picks between several. Before anything is previewed or posted, the server checks every person against the user's own Splitwise contacts: an id must be the user, a friend, or a member of the target group, and two names on the receipt can't be the same person. A wrong or made-up id is refused rather than posted.
 - **Nothing is added without an approved preview.** The preview shows exactly what will be recorded, with real Splitwise names and emails. Adding needs the preview's confirmation code: a signature over the exact expense, valid for 30 minutes and usable once. If anything changes after the preview, the add is refused.
+- **A per-user change limit for the shared server.** Each Splitwise account gets a fixed number of changes. A slot is taken atomically just before the write, so racing writes can't both pass the limit, and handed back if Splitwise rejects it. Previews check it first, so nobody goes through a whole preview only to be refused.
 - **Settling up is guarded too.** A payment can't exceed what's owed in that direction, needs an approved preview, and a matching payment from the last week is reported as a likely double-record.
 - **Deleting is as guarded as adding.** Only expenses the user added, one per approved preview; the preview's code covers the expense as it was, so an edit in between voids it, and the server re-reads the expense afterwards to confirm the delete.
 - **Check what Splitwise actually saved.** Splitwise can return success and still change an expense (it silently drops a new person from a group expense). After every add, the server compares the saved shares with the previewed ones and reports any difference instead of claiming success.
@@ -254,6 +255,9 @@ Splitwise requires an active Splitwise Pro subscription to register an app and u
 | `SPLITWISE_CLIENT_SECRET` | The app's consumer secret |
 | `SERVER_SECRET` | A random string of 32+ characters, e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `REDIS_URL` | Optional but recommended. On Railway, add a Redis service and set this to `${{Redis.REDIS_URL}}`. |
+| `WRITE_QUOTA` | Optional. Changes to Splitwise (adds, deletes, settle-ups) each user may make, ever. Unset = no limit. Counted per Splitwise user id, in Redis. |
+| `QUOTA_EXEMPT_USER_IDS` | Optional. Comma-separated Splitwise user ids with no limit (e.g. yours). |
+| `QUOTA_CONTACT` | Optional. Where users who hit the limit can ask for more; the AI shows it to them. |
 
 Client registrations, sign-in state, and tokens are encrypted with `SERVER_SECRET` and handed to the client. Each user's Splitwise token exists only inside their own encrypted token. Changing `SERVER_SECRET` signs everyone out. Access tokens last 24 hours and refresh tokens 90 days.
 
