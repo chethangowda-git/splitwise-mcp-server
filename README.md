@@ -276,3 +276,7 @@ That state lives in Redis when `REDIS_URL` is set. Otherwise it's kept in memory
 ```
 
 The suite covers rounding (ties, input order, negative amounts, zero-decimal currencies), splitting and reconciliation, each MCP tool through a real MCP client, the Splitwise integration against a fake API (name matching with ambiguous and missing names, refused mappings, previews, single-use confirmation codes including racing adds, exact posted shares, checking what Splitwise saved, duplicates, pagination, error handling, balances per currency and per group, deleting only your own expenses behind a single-use preview, settlements with overpayment and double-record checks, balance explanations from expense history), tool-call logging (names only, never arguments), loading secrets from SSM, and the full OAuth flow (public and confidential clients, code reuse, refresh rotation and replay, concurrent refreshes, revocation, forged state, consent page escaping).
+
+## License
+
+[MIT](LICENSE) © 2026 Chethan Gowda. Splitwise is a trademark of Splitwise, Inc.; this project is independent and not affiliated with or endorsed by Splitwise.

@@ -4,6 +4,8 @@ version = "0.3.0"
 description = "MCP server that reconciles receipts and splits them fairly, to the exact cent."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp>=2.2,<3",
     "pydantic>=2.7",
